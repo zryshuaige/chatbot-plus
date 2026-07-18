@@ -9,7 +9,7 @@ from pydantic import BaseModel
 import db
 from config import settings
 from prompts import tasks_summary
-from llm import available_models
+from llm import available_models, models_meta, image_model_names, image_models_meta
 
 router = APIRouter()
 
@@ -22,7 +22,17 @@ def get_tasks():
 
 @router.get("/models")
 def get_models():
-    return {"code": 200, "models": available_models(), "default": settings.default_model}
+    """返回文本模型列表 + 默认模型 + 各模型元数据（供前端悬停简介），
+    以及图片任务专用的两个模型名与其元数据。"""
+    models = available_models()
+    return {
+        "code": 200,
+        "models": models,
+        "default": settings.default_model,
+        "meta": models_meta(models),
+        "image_models": image_model_names(),       # {"gen": ..., "edit": ...}
+        "image_meta": image_models_meta(),          # {model_id: {...}}
+    }
 
 
 # ---------------- 会话 CRUD ----------------

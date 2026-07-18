@@ -53,8 +53,9 @@ def get_tasks():
 
 
 def get_models():
-    data = _get("/models")
-    return data["models"], data["default"]
+    """返回 /models 完整载荷：models/default/meta(文本模型元数据)/
+    image_models{gen,edit}/image_meta。前端用 meta 做悬停简介。"""
+    return _get("/models")
 
 
 def get_prefs():

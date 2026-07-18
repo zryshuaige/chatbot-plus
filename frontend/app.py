@@ -11,7 +11,7 @@ import streamlit.components.v1 as components
 
 import api_client as api
 from themes import theme_css, theme_keys, theme_name, DEFAULT_THEME
-from render import render_content, user_bubble_html, copy_chip_html, _normalize_attachments as _coerce_atts
+from render import render_content, user_bubble_html, copy_chip_html, attachments_html, _normalize_attachments as _coerce_atts
 
 st.set_page_config(page_title="chatbot-plus", page_icon="🤖", layout="wide",
                    initial_sidebar_state="expanded")
@@ -45,28 +45,42 @@ def _cp_components_js(sugg: list) -> str:
   }} catch (e) {{}}
 
   // ---- 复制助手全文（事件委托，按钮每次 rerun 重建，委托一次即可）----
-  function cpCopyFallback(text){{
+  // 同步优先：在 click 事件里同步创建隐藏 textarea + execCommand('copy')，保留用户手势，
+  // 且不受 iframe 剪贴板权限策略限制。macOS Safari 下异步 navigator.clipboard 会被拒、
+  // 且兜底若放进 Promise 回调执行时手势已失效，故必须同步优先。execCommand 失败再回退异步 API。
+  function cpSyncCopy(text){{
     var ta = d.createElement('textarea');
-    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
-    d.body.appendChild(ta); ta.select();
-    try {{ d.execCommand('copy'); }} catch (e) {{}}
+    ta.setAttribute('readonly', '');
+    ta.value = text;
+    ta.style.position = 'fixed'; ta.style.top = '0'; ta.style.left = '0';
+    ta.style.width = '2em'; ta.style.height = '2em';
+    ta.style.padding = '0'; ta.style.border = 'none'; ta.style.outline = 'none';
+    ta.style.boxShadow = 'none'; ta.style.background = 'transparent';
+    d.body.appendChild(ta);
+    ta.focus(); ta.select(); ta.setSelectionRange(0, text.length);
+    var ok = false;
+    try {{ ok = d.execCommand('copy'); }} catch (e) {{ ok = false; }}
     d.body.removeChild(ta);
+    return ok;
   }}
   w.cpCopy = function(el){{
     var bin = atob(el.dataset.b64);
     var bytes = new Uint8Array(bin.length);
     for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     var text = new TextDecoder('utf-8').decode(bytes);
-    var done = function(){{
+    var old = el.getAttribute('data-label') || el.innerHTML;
+    el.setAttribute('data-label', old);
+    var feedback = function(ok){{
       el.classList.add('cp-copied');
-      var old = el.getAttribute('data-label') || el.innerHTML;
-      el.setAttribute('data-label', old);
-      el.innerHTML = '✓ 已复制';
+      el.innerHTML = ok ? '✓ 已复制' : '⚠ 复制失败';
       setTimeout(function () {{ el.classList.remove('cp-copied'); el.innerHTML = old; }}, 1400);
     }};
+    var ok = cpSyncCopy(text);
+    if (ok) {{ feedback(true); return; }}
     if (w.navigator.clipboard && w.navigator.clipboard.writeText) {{
-      w.navigator.clipboard.writeText(text).then(done, function () {{ cpCopyFallback(text); done(); }});
-    }} else {{ cpCopyFallback(text); done(); }}
+      w.navigator.clipboard.writeText(text).then(function () {{ feedback(true); }},
+                                                function () {{ feedback(false); }});
+    }} else {{ feedback(false); }}
   }};
 
   // ---- 流式模式：从 DOM 推断（有 .cp-thinking=思考中；有「停止」按钮=流式中）----
@@ -132,6 +146,9 @@ def init_state():
         "tasks": [],
         "models": [],
         "default_model": "",
+        "model_meta": {},        # {model_id: {vendor,context,multimodal,tags,price,desc}}
+        "image_models": {},      # {"gen": ..., "edit": ...} 图片任务专用画图模型名
+        "image_meta": {},        # {image_model_id: {...}} 图片模型元数据
         "current_cid": None,
         "current_title": "",
         "current_model": "",
@@ -203,6 +220,35 @@ def _is_image_task() -> bool:
     return bool(t and t.get("model") in ("image_gen", "image_edit"))
 
 
+def _model_id_for_task(task_key: str, text_model: str = "") -> str:
+    """任务 -> 实际使用的模型 id。图片任务用专用画图模型，否则用传入的文本模型。
+    用于：start_streaming 设置 stream_model、侧边栏显示当前任务所用模型。"""
+    if task_key == "image_gen":
+        return st.session_state.image_models.get("gen") or text_model
+    if task_key == "image_edit":
+        return st.session_state.image_models.get("edit") or text_model
+    return text_model
+
+
+def _render_model_info(model_id, meta_map=None):
+    """渲染模型简介 caption：上下文长度 / 是否多模态 / 特色 / 价格。
+    详细描述放在 selectbox 的 help（悬停）里，这里只展示结构化要点。"""
+    meta_map = meta_map if meta_map is not None else st.session_state.model_meta
+    m = (meta_map or {}).get(model_id)
+    if not m:
+        st.caption(f"📌 {model_id}（暂无简介）")
+        return
+    parts = []
+    if m.get("context") and m["context"] != "-":
+        parts.append(f"📏 {m['context']}")
+    parts.append("🖼️ 多模态" if m.get("multimodal") else "📝 文本")
+    if m.get("tags"):
+        parts.append("✨ " + "/".join(m["tags"]))
+    if m.get("price") and m["price"] != "-":
+        parts.append(f"💰 {m['price']}")
+    st.caption(" · ".join(parts))
+
+
 def send_template(text: str):
     """点击提示词模版：创建会话并发送（与 send_suggestion 同路径）。"""
     ensure_conversation()
@@ -214,7 +260,12 @@ def load_meta():
     if not st.session_state.prefs_loaded:
         st.session_state.prefs = api.get_prefs()
         st.session_state.tasks = api.get_tasks()
-        st.session_state.models, st.session_state.default_model = api.get_models()
+        m = api.get_models()
+        st.session_state.models = m.get("models", [])
+        st.session_state.default_model = m.get("default", "")
+        st.session_state.model_meta = m.get("meta", {})
+        st.session_state.image_models = m.get("image_models", {})
+        st.session_state.image_meta = m.get("image_meta", {})
         if not st.session_state.new_model:
             st.session_state.new_model = (st.session_state.prefs.get("default_model")
                                           or st.session_state.default_model)
@@ -364,7 +415,9 @@ def start_streaming(query: str, regenerate: bool = False, file_metas: list = Non
     st.session_state.stream_usage = None
     st.session_state.stream_error = None
     st.session_state.stream_attachments = []
-    st.session_state.stream_model = st.session_state.current_model
+    # 图片任务用专用画图模型名落库/展示，否则用会话文本模型
+    st.session_state.stream_model = _model_id_for_task(
+        st.session_state.current_task, st.session_state.current_model)
     st.session_state.streaming = True
     st.rerun()
 
@@ -385,12 +438,16 @@ def finalize_streaming():
              "tokens": tokens, "model": model,
              "attachments": _coerce_atts(atts)}
         )
+    # 保存错误信息供主区域展示（图片任务报错等不再被静默吞掉）
+    if st.session_state.stream_error:
+        st.session_state["_last_error"] = st.session_state.stream_error
     st.session_state.last_usage = usage
     st.session_state.streaming = False
     st.session_state.stream_queue = None
     st.session_state.stop_event = None
     st.session_state.stream_buffer = ""
     st.session_state.stream_usage = None
+    st.session_state.stream_error = None
     st.session_state.stream_attachments = []
     maybe_auto_name()
 
@@ -623,11 +680,21 @@ with st.sidebar:
     st.selectbox("任务类型", list(task_options.keys()),
                  format_func=lambda k: task_options.get(k, k),
                  key="new_task")
-    # 图片任务：模型由专用画图模型决定，隐藏/禁用文本模型选择意义不大，仅提示。
     _nt = next((t for t in st.session_state.tasks if t["key"] == st.session_state.new_task), None)
-    if _nt and _nt.get("model") in ("image_gen", "image_edit"):
-        st.caption("⚙️ 该任务使用专用画图模型，下方模型选项不生效。")
-    st.selectbox("模型", st.session_state.models, key="new_model")
+    _nt_is_image = bool(_nt and _nt.get("model") in ("image_gen", "image_edit"))
+    # 当前新建任务实际使用的模型（图片任务=专用画图模型，否则=选中的文本模型）
+    _eff_model = _model_id_for_task(st.session_state.new_task,
+                                    st.session_state.new_model or st.session_state.default_model)
+    _eff_meta_map = st.session_state.image_meta if _nt_is_image else st.session_state.model_meta
+    _eff_meta = (_eff_meta_map or {}).get(_eff_model, {})
+    # 文本模型下拉：悬停(help)显示该模型详细描述；图片任务禁用（不生效）
+    _help = None if _nt_is_image else (_eff_meta.get("desc") or f"当前选中的文本模型：{_eff_model}")
+    st.selectbox("模型", st.session_state.models, key="new_model",
+                 help=_help, disabled=_nt_is_image)
+    if _nt_is_image:
+        st.caption("⚙️ 该任务使用专用画图模型，下方文本模型选项不生效。")
+    # 模型简介：上下文/多模态/特色/价格（图片任务展示画图模型信息）
+    _render_model_info(_eff_model, _eff_meta_map)
     if st.button("➕ 新建对话", use_container_width=True):
         new_conversation()
 
@@ -669,6 +736,10 @@ with st.sidebar:
 if st.session_state.get("_attach_err"):
     st.error(f"📎 {st.session_state['_attach_err']}")
     del st.session_state["_attach_err"]
+
+if st.session_state.get("_last_error"):
+    st.error(f"⚠️ {st.session_state['_last_error']}")
+    del st.session_state["_last_error"]
     
 if st.session_state.current_cid:
     header = st.columns([7, 2, 1])
@@ -764,10 +835,18 @@ for m in st.session_state.messages:
         # 助手：st.chat_message 靠左，保留代码块复制
         with st.chat_message("assistant", avatar="🤖"):
             render_content(m["content"])
+            # 助手消息附件（图片生成/编辑结果等）：图片缩略图可点击看大图
+            _atts_html = attachments_html(m.get("attachments"))
+            if _atts_html:
+                st.markdown(_atts_html, unsafe_allow_html=True)
             info = []
             if m.get("model"):
                 info.append(m["model"])
-            if m.get("tokens"):
+            _img_n = sum(1 for a in (m.get("attachments") or [])
+                         if a.get("kind") == "image")
+            if _img_n:
+                info.append(f"🖼️ {_img_n} 张图")
+            elif m.get("tokens"):
                 info.append(f"{m['tokens']} tokens")
             if info:
                 st.markdown(
@@ -804,13 +883,20 @@ if st.session_state.streaming:
 # 最近一次 token 用量
 if st.session_state.get("last_usage"):
     u = st.session_state.last_usage
-    _pills = [
-        f"<span class='cp-pill'>⌨️ 输入 {u.get('prompt_tokens', 0)}</span>",
-        f"<span class='cp-pill'>✍️ 输出 {u.get('completion_tokens', 0)}</span>",
-        f"<span class='cp-pill cp-pill-accent'>合计 {u.get('total_tokens', 0)} tokens</span>",
-    ]
-    if u.get("compressed"):
-        _pills.append("<span class='cp-pill cp-pill-warn'>🗜 已压缩</span>")
+    if u.get("image_task"):
+        # 图片任务不产生文本 token，显示画图模型 + 不计 token 提示，而非误导性的 0
+        _pills = [
+            "<span class='cp-pill cp-pill-accent'>🎨 画图任务 · 不计文本 token</span>",
+            f"<span class='cp-pill'>{html.escape(st.session_state.stream_model or '')}</span>",
+        ]
+    else:
+        _pills = [
+            f"<span class='cp-pill'>⌨️ 输入 {u.get('prompt_tokens', 0)}</span>",
+            f"<span class='cp-pill'>✍️ 输出 {u.get('completion_tokens', 0)}</span>",
+            f"<span class='cp-pill cp-pill-accent'>合计 {u.get('total_tokens', 0)} tokens</span>",
+        ]
+        if u.get("compressed"):
+            _pills.append("<span class='cp-pill cp-pill-warn'>🗜 已压缩</span>")
     st.markdown(f"<div class='cp-usage'>{''.join(_pills)}</div>",
                 unsafe_allow_html=True)
 

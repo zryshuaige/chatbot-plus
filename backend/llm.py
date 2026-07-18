@@ -18,6 +18,88 @@ def available_models() -> list[str]:
     return settings.models or [settings.default_model]
 
 
+# ---------------- 模型元数据（供前端悬停简介）----------------
+# 上下文长度 / 是否多模态 / 特色 / 价格。数据来自 SiliconFlow 官方价格页与
+# 首页文案（2026-07），不确定的项用定性表述，避免给出错误数字。
+# 键名需与 .env 的 MODELS / 图片模型名一致；未命中的模型回退到通用简介。
+MODEL_META: dict[str, dict] = {
+    "deepseek-ai/DeepSeek-V4-Pro": {
+        "vendor": "DeepSeek", "context": "百万字级（超长上下文）",
+        "multimodal": False, "tags": ["旗舰", "超长上下文", "强推理"],
+        "price": "¥12 / ¥24 (输入/输出·每百万 token)",
+        "desc": "DeepSeek 旗舰对话模型，百万字级超长上下文，综合能力与推理强。文本对话，非多模态。",
+    },
+    "deepseek-ai/DeepSeek-V4-Flash": {
+        "vendor": "DeepSeek", "context": "百万字级（超长上下文）",
+        "multimodal": False, "tags": ["轻量", "快速", "低成本"],
+        "price": "¥1 / ¥2 (输入/输出·每百万 token)",
+        "desc": "DeepSeek-V4 轻量快速版，同样百万字级上下文，成本低、响应快，适合高吞吐。文本对话，非多模态。",
+    },
+    "moonshotai/Kimi-K2.7-Code": {
+        "vendor": "Moonshot", "context": "256K（长上下文）",
+        "multimodal": True, "tags": ["代码专精", "多模态", "会看屏幕"],
+        "price": "¥6.5 / ¥27 (输入/输出·每百万 token)",
+        "desc": "Kimi 代码专精模型，支持视觉（会看屏幕），擅长编程与软件工程。多模态。",
+    },
+    "Pro/moonshotai/Kimi-K2.6": {
+        "vendor": "Moonshot", "context": "256K（长上下文）",
+        "multimodal": False, "tags": ["代码", "长文档", "Pro 高并发"],
+        "price": "¥6.5 / ¥27 (输入/输出·每百万 token)",
+        "desc": "Kimi K2.6 Pro 版，256K 长上下文，擅长代码与长文档处理，Pro 通道更高并发。文本对话，非多模态。",
+    },
+    "MiniMaxAI/MiniMax-M2.5": {
+        "vendor": "MiniMax", "context": "超长上下文（百万级）",
+        "multimodal": False, "tags": ["通用对话", "性价比"],
+        "price": "¥2.1 / ¥8.4 (输入/输出·每百万 token)",
+        "desc": "MiniMax M2.5 通用对话模型，超长上下文，性价比高。文本对话，非多模态。",
+    },
+    "Qwen/Qwen2.5-7B-Instruct": {
+        "vendor": "通义千问", "context": "32K（可扩展至 128K）",
+        "multimodal": False, "tags": ["轻量", "便宜", "响应快"],
+        "price": "免费 / 极低",
+        "desc": "通义千问 7B 轻量模型，32K 上下文，响应快、成本低，适合轻量任务。文本对话，非多模态（视觉版为 Qwen2.5-VL）。",
+    },
+    # ---- 图片模型 ----
+    "Tongyi-MAI/Z-Image-Turbo": {
+        "vendor": "通义 Z-Image", "context": "—",
+        "multimodal": False, "tags": ["文生图", "高速", "~1s 出图"],
+        "price": "¥0.10 / 张",
+        "desc": "通义 Z-Image 高速版文生图模型，约 1 秒出图，适合快速生成。专用画图模型，不走文本对话。",
+    },
+    "Qwen/Qwen-Image-Edit-2509": {
+        "vendor": "通义千问", "context": "—",
+        "multimodal": False, "tags": ["图片编辑", "图生图", "换背景/改风格"],
+        "price": "¥0.30 / 张",
+        "desc": "通义千问图片编辑模型（图生图），支持换背景、改风格、加/删元素、调光影、加文字等。专用编辑模型，不走文本对话。",
+    },
+}
+
+
+def _generic_meta(model_id: str) -> dict:
+    """未登记模型的兜底简介。"""
+    vendor = model_id.split("/", 1)[0] if "/" in model_id else ""
+    return {
+        "vendor": vendor, "context": "—", "multimodal": False, "tags": [],
+        "price": "—",
+        "desc": f"{model_id}（暂无简介，可在 SiliconFlow 模型广场查看详情）。",
+    }
+
+
+def models_meta(model_ids: list[str]) -> dict[str, dict]:
+    """取一批模型的元数据；未登记的回退通用简介。"""
+    return {mid: MODEL_META.get(mid) or _generic_meta(mid) for mid in model_ids}
+
+
+def image_model_names() -> dict:
+    """图片任务专用的两个模型名（来自 settings）。前端据此显示正确模型。"""
+    return {"gen": settings.image_gen_model, "edit": settings.image_edit_model}
+
+
+def image_models_meta() -> dict[str, dict]:
+    """图片模型的元数据。"""
+    return models_meta([settings.image_gen_model, settings.image_edit_model])
+
+
 # ---------------- token 估算 ----------------
 _CJK_RE = re.compile(r"[一-鿿぀-ヿ가-힯]")
 

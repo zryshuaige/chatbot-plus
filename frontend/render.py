@@ -174,6 +174,12 @@ def _attach_chips(attachments) -> str:
     return f'<div class="cp-attaches">{"".join(items)}</div>'
 
 
+def attachments_html(attachments) -> str:
+    """渲染附件区 HTML（图片缩略图 + 文件 chip），助手/用户气泡复用。
+    无附件返回空串。"""
+    return _attach_chips(attachments)
+
+
 def user_bubble_html(content: str, avatar_path: str,
                      attachments=None) -> str:
     """渲染一条靠右的用户气泡（avatar + 气泡 + 附件 chip）。"""

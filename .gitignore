@@ -12,3 +12,4 @@ __pycache__/
 # 一键启动脚本的运行日志
 logs/*.log
 logs/*.pid
+.claude/

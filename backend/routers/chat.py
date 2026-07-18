@@ -1,5 +1,6 @@
 '''聊天路由：SSE 流式对话 + 自动命名。
 SSE 事件类型：token / usage / done / error，前端按行解析 data: ...'''
+import asyncio
 import base64
 import json
 import uuid
@@ -133,13 +134,15 @@ def _image_event_stream(conv: dict, last_user: dict, user_mid: str):
                 if not prompt:
                     yield emit({"type": "error", "message": "请描述你想对图片做的修改，例如“换背景为海边落日”。"})
                     return
-                raw = edit_image(prompt, src, settings.image_size)
+                # 画图是同步阻塞调用（requests + 模型推理数秒~数十秒），
+                # 放到线程池执行，避免堵塞 asyncio 事件循环导致 SSE 卡死。
+                raw = await asyncio.to_thread(edit_image, prompt, src, settings.image_size)
                 note = "🖼️ 已按你的要求编辑图片，结果见下方预览（点击可看大图/下载）。"
             else:  # image_gen
                 if not prompt:
                     yield emit({"type": "error", "message": "请输入想生成的图片描述，或点击下方提示词模版。"})
                     return
-                raw = generate_image(prompt, settings.image_size)
+                raw = await asyncio.to_thread(generate_image, prompt, settings.image_size)
                 note = "🎨 已生成图片，结果见下方预览（点击可看大图/下载）。"
 
             att = _save_image_bytes(raw, prefix="edit" if task == "image_edit" else "gen")
@@ -147,7 +150,9 @@ def _image_event_stream(conv: dict, last_user: dict, user_mid: str):
             yield emit({"type": "token", "content": note})
             # 生成图作为助手消息的附件下发
             yield emit({"type": "image", "attachments": [att]})
-            yield emit({"type": "usage", "compressed": False,
+            # 图片任务不产生文本 token：用 image_task 标记，前端据此显示
+            # “画图任务·不计文本 token”而非误导性的 0 token。
+            yield emit({"type": "usage", "compressed": False, "image_task": True,
                         "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
             yield emit({"type": "done"})
         except Exception as e:
