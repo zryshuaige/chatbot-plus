@@ -16,7 +16,7 @@
 
 ## ✨ 项目简介
 
-chatbot-plus 是一个基于 LLM 的多轮对话应用，主打**安全、个性、长效记忆与流畅体验**。后端用 FastAPI 提供 SSE 流式接口，前端用 Streamlit 呈现可交互的聊天界面，所有数据落地 SQLite，刷新/重启不丢历史，密钥全程走 `.env` 零硬编码。
+chatbot-plus 是一个基于 LLM 的多轮对话应用，主打**安全、个性、长效记忆与流畅体验**。后端用 FastAPI 提供 SSE 流式接口，前端用 Streamlit 呈现可交互的聊天界面，所有数据落地 SQLite，刷新/重启不丢历史，密钥全程集中管理、零硬编码。
 
 ## 🧰 技术栈
 
@@ -26,7 +26,7 @@ chatbot-plus 是一个基于 LLM 的多轮对话应用，主打**安全、个性
 | **FastAPI** + **uvicorn** | 异步 Web 框架与 ASGI 服务器 |
 | **AsyncOpenAI** | 兼容 OpenAI 协议的大模型调用（默认走 SiliconFlow） |
 | **Pydantic** | 请求/响应数据校验 |
-| **python-dotenv** | `.env` 配置与密钥加载 |
+| **python-dotenv** | 配置与密钥加载 |
 | **SQLite**（`sqlite3` 标准库） | 会话、消息、用户偏好持久化 |
 | **python-multipart** | 头像图片上传解析 |
 
@@ -38,13 +38,13 @@ chatbot-plus 是一个基于 LLM 的多轮对话应用，主打**安全、个性
 | **Pillow** | 头像图片处理 |
 
 ### 🚪 端口
-- 后端 `8002` · 前端 `8502`，均可通过 `.env` 自由配置。
+- 后端 `8002` · 前端 `8502`，均可自由配置。
 
 ## 📋 功能清单
 
 | 分类 | 功能 | 说明 |
 |---|---|---|
-| 🔐 安全 | 密钥 `.env` 化 | 后端零硬编码，`.env` 不入库，`.env.example` 为模板 |
+| 🔐 安全 | 密钥集中管理 | 后端零硬编码，密钥不入库，提供配置模板 |
 | 👤 个性化 | 头像上传 | 上传图片存本地，气泡内展示，emoji 兜底 |
 | 🏷️ 个性化 | 历史自动命名 | 首轮问答后 LLM 生成 ≤12 字标题，可手动改名 |
 | 🧭 个性化 | 任务系统提示词 | 日常闲聊/学术研究/代码编程/文案写作/翻译润色/学习辅导，可自定义覆盖 |
@@ -52,7 +52,7 @@ chatbot-plus 是一个基于 LLM 的多轮对话应用，主打**安全、个性
 | 🧠 核心 | 上下文压缩 | 超阈值时把旧消息压成摘要，保留最近 N 轮原文，全量历史仍可查看 |
 | ✍️ 增强 | Markdown + 代码高亮 + 复制 | 代码块用 `st.code`（自带复制），prose 用 `st.markdown` |
 | 🔁 增强 | 重生成 / 编辑 / 停止 | 每条消息可重生成或编辑重发；流式中可停止（保留部分内容） |
-| 🤖 增强 | 多模型 + token 用量 | `.env` 配置多模型下拉，每次对话显示 prompt/completion/total tokens |
+| 🤖 增强 | 多模型 + token 用量 | 多模型下拉切换，每次对话显示 prompt/completion/total tokens |
 | 🔍 增强 | 会话搜索 + 导出 | 关键词搜标题与内容；单会话导出 Markdown / JSON |
 | 💾 持久化 | 全量落库 | 用户偏好、会话、消息存 SQLite，刷新/重启不丢 |
 
@@ -60,13 +60,12 @@ chatbot-plus 是一个基于 LLM 的多轮对话应用，主打**安全、个性
 
 ```
 chatbot-plus/
-├── .env / .env.example        # 真实配置 / 模板（密钥、端口、模型、压缩阈值）
 ├── .gitignore
 ├── requirements.txt
 ├── README.md
 ├── backend/
 │   ├── main.py                # FastAPI 入口：CORS、头像静态目录、路由注册
-│   ├── config.py              # dotenv 加载 -> Settings
+│   ├── config.py              # 配置加载 -> Settings
 │   ├── db.py                  # SQLite 建表 + CRUD
 │   ├── llm.py                 # AsyncOpenAI 客户端、token 估算、命名/摘要
 │   ├── prompts.py             # 任务 -> 系统提示词库
@@ -89,8 +88,7 @@ chatbot-plus/
 cd chatbot-plus
 pip install -r requirements.txt
 
-# 1) 配置密钥（仓库已带一份可用的 .env；换自己的 key 就改这里）
-cp .env.example .env      # 然后编辑 .env 填入 API_KEY
+# 1) 配置密钥：按仓库内的配置模板填入自己的 API Key
 
 # 2) 启动后端（终端 A）
 cd backend
@@ -116,14 +114,14 @@ streamlit run app.py --server.port 8502
 - 摘要持久化，跨会话保留。阈值与保留轮数在「个人化设置」可调。
 
 ### 🧩 流式与持久化解耦
-助手回复由前端在「完成/停止」时调用 `POST /conversations/{cid}/messages` 落库——这样**停止生成也能保存已产出的部分内容**，而非整段丢弃。
+助手回复由前端在「完成/停止」时调用 `POST /conversations/{cid}/messages` 落库--这样**停止生成也能保存已产出的部分内容**，而非整段丢弃。
 
 ### 🛡️ 工程化要点
-- 密钥硬编码 → `.env` 集中管理
-- 全局共享 `messages`（线程不安全）→ 每请求独立组装
-- 刷新丢历史 → SQLite 持久化
-- 文件上传未落地 → 头像真正存储展示
-- 上下文粗暴截断 → 摘要压缩
+- 密钥硬编码 -> 集中配置管理
+- 全局共享 `messages`（线程不安全）-> 每请求独立组装
+- 刷新丢历史 -> SQLite 持久化
+- 文件上传未落地 -> 头像真正存储展示
+- 上下文粗暴截断 -> 摘要压缩
 
 ## 🗺️ Roadmap
 
