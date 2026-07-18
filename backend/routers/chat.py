@@ -22,6 +22,7 @@ class ChatRequest(BaseModel):
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     max_tokens: Optional[int] = None
+    file_ids: list[str] = []  # 本次随消息上传的文件 id
 
 
 @router.post("/chat")
@@ -40,12 +41,36 @@ async def chat(req: ChatRequest):
     keep_turns = prefs.get("history_keep") or settings.keep_recent_turns
 
     # step01：用户消息先落库（重新生成时不新增，复用已有最后一条）
+    # 附件元数据：file_id + filename + kind + chars
+    attachments_meta = []
+    if not req.regenerate and req.file_ids:
+        for f in db.get_files(req.file_ids):
+            attachments_meta.append({
+                "file_id": f["id"], "filename": f["filename"],
+                "kind": f["kind"], "chars": f.get("chars", 0),
+            })
     user_mid = ""
     if not req.regenerate:
-        user_mid = db.add_message(conv["id"], "user", req.query)
+        user_mid = db.add_message(conv["id"], "user", req.query,
+                                  attachments=attachments_meta)
 
     # step02：组装上下文（可能触发压缩）
     messages = db.list_messages(conv["id"])
+
+    # 把“最后一条用户消息”所附文件的正文拼进上下文（重新生成时同样生效）
+    last_user = next((m for m in reversed(messages) if m["role"] == "user"), None)
+    if last_user:
+        fids = [a.get("file_id") for a in (last_user.get("attachments") or [])
+                if a.get("file_id")]
+        if fids:
+            file_rows = db.get_files(fids)
+            aug = "\n\n".join(
+                f"【附件：{fr['filename']}】\n{fr['text']}"
+                for fr in file_rows if fr.get("text")
+            )
+            if aug:
+                last_user["content"] = (last_user.get("content", "") or "") + "\n\n" + aug
+
     llm_messages, compressed = await build_llm_messages(conv, messages, threshold, keep_turns)
 
     # step03：流式请求大模型并通过 SSE 推给前端

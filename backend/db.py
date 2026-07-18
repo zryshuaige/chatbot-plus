@@ -1,5 +1,6 @@
 '''SQLite 持久化：用户偏好、会话、消息全部落库，刷新/重启不丢数据。
 使用标准库 sqlite3，无需额外安装。每次操作打开独立连接，规避跨线程问题。'''
+import json
 import sqlite3
 import uuid
 from datetime import datetime
@@ -23,7 +24,7 @@ def get_conn() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """建表。IF NOT EXISTS 保证可重复执行。"""
+    """建表。IF NOT EXISTS 保证可重复执行；附带轻量列迁移兼容旧库。"""
     with get_conn() as conn:
         conn.executescript(
             """
@@ -61,15 +62,32 @@ def init_db() -> None:
                 content TEXT,
                 tokens INTEGER DEFAULT 0,
                 model TEXT DEFAULT '',
+                attachments TEXT DEFAULT '[]',
                 created_at TEXT,
                 FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id);
 
+            -- 上传文件：抽取的文本随文件留存，聊天时按 id 取回注入上下文
+            CREATE TABLE IF NOT EXISTS files (
+                id TEXT PRIMARY KEY,
+                filename TEXT,
+                kind TEXT DEFAULT 'text',
+                size INTEGER DEFAULT 0,
+                chars INTEGER DEFAULT 0,
+                text TEXT DEFAULT '',
+                path TEXT DEFAULT '',
+                created_at TEXT
+            );
+
             -- 确保偏好行存在
             INSERT OR IGNORE INTO prefs (id) VALUES (1);
             """
         )
+        # 兼容旧库：messages 表可能缺 attachments 列
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}
+        if "attachments" not in cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN attachments TEXT DEFAULT '[]'")
 
 
 # ---------------- 偏好 ----------------
@@ -146,13 +164,15 @@ def delete_conversation(cid: str) -> None:
 
 
 # ---------------- 消息 ----------------
-def add_message(cid: str, role: str, content: str, tokens: int = 0, model: str = "") -> str:
+def add_message(cid: str, role: str, content: str, tokens: int = 0,
+                model: str = "", attachments: list = None) -> str:
     mid = uuid.uuid4().hex
+    atts = json.dumps(attachments or [], ensure_ascii=False)
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO messages (id, conversation_id, role, content, tokens, model, created_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (mid, cid, role, content, tokens, model, _now()),
+            "INSERT INTO messages (id, conversation_id, role, content, tokens, model, attachments, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (mid, cid, role, content, tokens, model, atts, _now()),
         )
         conn.execute("UPDATE conversations SET updated_at=? WHERE id=?", (_now(), cid))
     return mid
@@ -164,7 +184,15 @@ def list_messages(cid: str) -> list[dict]:
         rows = conn.execute(
             "SELECT * FROM messages WHERE conversation_id=? ORDER BY rowid", (cid,)
         ).fetchall()
-        return [dict(r) for r in rows]
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["attachments"] = json.loads(d.get("attachments") or "[]")
+            except (ValueError, TypeError):
+                d["attachments"] = []
+            out.append(d)
+        return out
 
 
 def truncate_after(cid: str, msg_id: str) -> None:
@@ -200,3 +228,36 @@ def truncate_from(cid: str, msg_id: str) -> None:
 def set_conversation_summary(cid: str, summary: str, until_msg_id: str) -> None:
     """压缩完成后，记录摘要与“已摘要到哪条消息”。"""
     update_conversation(cid, summary=summary, summary_until_msg_id=until_msg_id)
+
+
+# ---------------- 上传文件 ----------------
+def add_file(filename: str, kind: str, size: int, chars: int,
+             text: str, path: str) -> str:
+    fid = uuid.uuid4().hex
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO files (id, filename, kind, size, chars, text, path, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (fid, filename, kind, size, chars, text, path, _now()),
+        )
+    return fid
+
+
+def get_files(file_ids: list[str]) -> list[dict]:
+    """按 id 批量取文件记录（保持传入顺序）。"""
+    if not file_ids:
+        return []
+    with get_conn() as conn:
+        rows = {}
+        for fid in file_ids:
+            r = conn.execute("SELECT * FROM files WHERE id=?", (fid,)).fetchone()
+            if r:
+                rows[fid] = dict(r)
+        return [rows[fid] for fid in file_ids if fid in rows]
+
+
+def get_file(file_id: str) -> Optional[dict]:
+    with get_conn() as conn:
+        r = conn.execute("SELECT * FROM files WHERE id=?", (file_id,)).fetchone()
+        return dict(r) if r else None
+

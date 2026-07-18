@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 import db
 from config import settings
-from routers import chat, conversations, prefs
+from routers import chat, conversations, prefs, files
 
 # step01：建库建表
 db.init_db()
@@ -29,6 +29,7 @@ app.mount("/avatars", StaticFiles(directory=str(settings.avatars_dir)), name="av
 app.include_router(chat.router, tags=["chat"])
 app.include_router(conversations.router, tags=["conversations"])
 app.include_router(prefs.router, tags=["prefs"])
+app.include_router(files.router, tags=["files"])
 
 
 @app.get("/")

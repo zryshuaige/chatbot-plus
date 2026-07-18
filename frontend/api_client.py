@@ -71,6 +71,20 @@ def upload_avatar(file_bytes: bytes, filename: str):
     return r.json()
 
 
+def upload_files(file_objs: list):
+    """批量上传文件，返回 [{id,filename,kind,size,chars}, ...]。
+    file_objs 为 Streamlit UploadedFile 列表。"""
+    if not file_objs:
+        return []
+    multipart = [("files", (f.name, f.getvalue())) for f in file_objs]
+    r = requests.post(f"{BASE_URL}/upload", files=multipart, timeout=60)
+    return r.json().get("files", [])
+
+
+def file_download_url(file_id: str) -> str:
+    return f"{BASE_URL}/files/{file_id}"
+
+
 # ---------------- 会话 ----------------
 def list_conversations(search: Optional[str] = None):
     params = {"search": search} if search else None
@@ -119,6 +133,7 @@ def stream_chat_threaded(
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
     max_tokens: Optional[int] = None,
+    file_ids: Optional[list] = None,
 ):
     """启动一个后台线程消费 SSE 流，把事件放入 queue 返回。
     返回 (event_queue, stop_event)。前端在 fragment 中轮询 queue 渲染。"""
@@ -136,6 +151,8 @@ def stream_chat_threaded(
         payload["top_p"] = top_p
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
+    if file_ids:
+        payload["file_ids"] = file_ids
 
     def consume():
         try:

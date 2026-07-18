@@ -8,7 +8,7 @@ import streamlit as st
 
 import api_client as api
 from themes import theme_css, theme_keys, theme_name, DEFAULT_THEME
-from render import render_content, load_avatar
+from render import render_content, user_bubble_html, _normalize_attachments as _coerce_atts
 
 st.set_page_config(page_title="chatbot-plus", page_icon="🤖", layout="wide",
                    initial_sidebar_state="expanded")
@@ -38,6 +38,7 @@ def init_state():
         "prefs_loaded": False,
         "new_task": "daily",       # 侧边栏“新建对话”用的任务
         "new_model": "",
+        "pending_attachments": [],  # 待随下一条消息发送的附件 [{id,filename,kind,chars}]
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -75,11 +76,13 @@ def switch_conversation(cid: str):
     st.session_state.current_task = conv.get("task", "daily")
     st.session_state.messages = [
         {"id": m["id"], "role": m["role"], "content": m["content"],
-         "tokens": m.get("tokens", 0), "model": m.get("model", "")}
+         "tokens": m.get("tokens", 0), "model": m.get("model", ""),
+         "attachments": _coerce_atts(m.get("attachments"))}
         for m in msgs
     ]
     st.session_state.editing_msg_id = None
     st.session_state.streaming = False
+    st.session_state.pending_attachments = []
 
 
 def ensure_conversation():
@@ -136,15 +139,25 @@ def start_streaming(query: str, regenerate: bool = False):
     cid = st.session_state.current_cid
     if not cid:
         return
+    file_ids = []
     if not regenerate:
+        atts = st.session_state.pending_attachments or []
+        attachments_meta = [
+            {"file_id": a["id"], "filename": a["filename"],
+             "kind": a.get("kind", ""), "chars": a.get("chars", 0)}
+            for a in atts
+        ]
+        file_ids = [a["id"] for a in atts]
         # 乐观加入用户消息（真实 id 由 start 事件回填）
         st.session_state.messages.append(
-            {"id": None, "role": "user", "content": query, "tokens": 0, "model": ""}
+            {"id": None, "role": "user", "content": query, "tokens": 0, "model": "",
+             "attachments": attachments_meta}
         )
     q, stop = api.stream_chat_threaded(
         cid, query, regenerate=regenerate,
         temperature=prefs.get("temperature"), top_p=prefs.get("top_p"),
         max_tokens=prefs.get("max_tokens"),
+        file_ids=file_ids,
     )
     st.session_state.stream_queue = q
     st.session_state.stop_event = stop
@@ -153,6 +166,8 @@ def start_streaming(query: str, regenerate: bool = False):
     st.session_state.stream_error = None
     st.session_state.stream_model = st.session_state.current_model
     st.session_state.streaming = True
+    if not regenerate:
+        st.session_state.pending_attachments = []
     st.rerun()
 
 
@@ -270,7 +285,7 @@ def _on_avatar_change():
 
 def render_settings():
     """偏好设置：昵称、头像、主题、采样参数、压缩策略。"""
-    with st.expander("⚙️ 个人化设置"):
+    with st.expander("⚙️ 个性化设置"):
         st.text_input("昵称", value=prefs.get("nickname", "我"), key="set_nickname")
 
         cur_avatar = prefs.get("avatar_path", "")
@@ -380,10 +395,10 @@ with st.sidebar:
 
 
 # ================ 主区域 ================
-st.title("💬 多轮聊天（升级版）")
+st.title("💬 多轮聊天")
 
 if st.session_state.current_cid:
-    header = st.columns([6, 2, 1, 1])
+    header = st.columns([7, 2, 1])
     # 切换会话时重置标题输入框
     if st.session_state.get("_title_cid") != st.session_state.current_cid:
         st.session_state["_title_cid"] = st.session_state.current_cid
@@ -398,42 +413,59 @@ if st.session_state.current_cid:
                          key="title_input", on_change=on_title_change)
     header[1].markdown(f"`{task_name(st.session_state.current_task)}`")
 
-    exp_md = header[2].button("📝MD")
-    exp_json = header[3].button("🗂JSON")
-    if exp_md:
-        data = api.export_conversation(st.session_state.current_cid, "md")
-        st.download_button("下载 Markdown", data=data["content"],
-                           file_name=data["filename"], mime="text/markdown")
-    if exp_json:
-        data = api.export_conversation(st.session_state.current_cid, "json")
-        st.download_button("下载 JSON", data=data["content"],
+    with header[2].popover("⬇️", use_container_width=True, help="导出当前会话"):
+        st.caption("导出当前会话")
+        md = api.export_conversation(st.session_state.current_cid, "md")
+        js = api.export_conversation(st.session_state.current_cid, "json")
+        st.download_button("Markdown", data=md["content"],
+                           file_name=md["filename"], mime="text/markdown",
+                           use_container_width=True)
+        st.download_button("JSON", data=js["content"],
                            file_name=f"{st.session_state.current_title}.json",
-                           mime="application/json")
+                           mime="application/json", use_container_width=True)
 else:
-    st.info("👈 在左侧点击「新建对话」开始聊天，或直接在下方输入会自动创建。")
+    st.markdown(
+        "<div style='padding:2.5rem 1rem;color:inherit;'>"
+        "<h3 style='margin-bottom:0.4rem;'>开始一段新对话</h3>"
+        "<p style='opacity:0.7;margin:0;'>在下方输入消息即可开始，"
+        "或在左侧「新建对话」中选择任务与模型。</p>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 # 渲染历史消息
-user_avatar = load_avatar(prefs.get("avatar_path", ""), "user")
+user_avatar_path = prefs.get("avatar_path", "")
 for m in st.session_state.messages:
-    with st.chat_message(m["role"],
-                         avatar=user_avatar if m["role"] == "user" else "🤖"):
-        render_content(m["content"])
-        meta = st.container()
-        mcols = meta.columns([2, 1, 1])
-        info = []
-        if m["role"] == "assistant" and m.get("model"):
-            info.append(m["model"])
-        if m.get("tokens"):
-            info.append(f"{m['tokens']} tokens")
-        mcols[0].caption(" · ".join(info) if info else " ")
-        if m["role"] == "assistant" and not st.session_state.streaming:
-            if mcols[1].button("🔄", key=f"rg_{m['id']}", help="重新生成"):
-                handle_regen(m["id"])
-        if m["role"] == "user" and not st.session_state.streaming:
-            if mcols[2].button("✏️", key=f"ed_{m['id']}", help="编辑后重发"):
+    if m["role"] == "user":
+        # 用户：自定义 HTML 气泡，靠右（微信式）
+        st.markdown(
+            user_bubble_html(m["content"], user_avatar_path,
+                             m.get("attachments")),
+            unsafe_allow_html=True,
+        )
+        if not st.session_state.streaming:
+            # 编辑按钮：小图标，靠右对齐
+            uc = st.columns([10, 1])
+            if uc[1].button("✏️", key=f"ed_{m['id']}",
+                            help="编辑后重发"):
                 st.session_state.editing_msg_id = m["id"]
                 st.session_state["edit_text"] = m["content"]
                 st.rerun()
+    else:
+        # 助手：st.chat_message 靠左，保留代码块复制
+        with st.chat_message("assistant", avatar="🤖"):
+            render_content(m["content"])
+            info = []
+            if m.get("model"):
+                info.append(m["model"])
+            if m.get("tokens"):
+                info.append(f"{m['tokens']} tokens")
+            bc = st.columns([1, 5])
+            if info:
+                bc[1].caption(" · ".join(info))
+            if not st.session_state.streaming:
+                if bc[0].button("🔄", key=f"rg_{m['id']}", help="重新生成回复"):
+                    handle_regen(m["id"])
 
 # 编辑框
 if st.session_state.editing_msg_id and not st.session_state.streaming:
@@ -463,9 +495,56 @@ if st.session_state.get("last_usage"):
         note += "  ·  已触发上下文压缩"
     st.caption(note)
 
+# ---------------- 附件上传（紧凑按钮，位于输入框上方左侧） ----------------
+def _on_attach_change():
+    """选择文件后立即上传，追加到待发送列表，再清空选择器以便继续追加。"""
+    up = st.session_state.get("chat_uploader") or []
+    if not up:
+        return
+    try:
+        metas = api.upload_files(list(up))
+        st.session_state.pending_attachments.extend(metas)
+    except Exception as e:
+        st.session_state["_attach_msg"] = f"❌ 上传失败：{e}"
+    st.session_state.pop("chat_uploader", None)
+    st.rerun()
+
+
+chat_disabled = st.session_state.streaming or bool(st.session_state.editing_msg_id)
+_ATTACH_TYPES = ["txt", "md", "markdown", "py", "js", "ts", "java", "c", "cpp", "go",
+                 "rs", "rb", "php", "sh", "sql", "json", "yaml", "yml", "xml", "html",
+                 "css", "csv", "tsv", "toml", "log", "ini", "cfg", "conf", "r", "lua",
+                 "png", "jpg", "jpeg", "gif", "webp"]
+
+# 左侧一个 📎 按钮（popover 内放文件选择器与待发送列表），右侧显示附件数量
+attach_row = st.columns([1, 3])
+with attach_row[0].popover("📎 附件", disabled=chat_disabled, use_container_width=True,
+                           help="添加附件：文本/代码文件可被读取，图片仅记录文件名"):
+    st.file_uploader("选择文件", accept_multiple_files=True, type=_ATTACH_TYPES,
+                     key="chat_uploader", on_change=_on_attach_change,
+                     label_visibility="collapsed")
+    st.caption("文本 / 代码文件可被读取注入上下文；图片仅记录文件名。")
+    if st.session_state.get("_attach_msg"):
+        st.caption(st.session_state["_attach_msg"])
+    if st.session_state.pending_attachments:
+        st.divider()
+        st.caption("待发送附件")
+        for a in list(st.session_state.pending_attachments):
+            rc = st.columns([5, 1])
+            tag = "📄" if a.get("kind") == "text" else "🖼"
+            rc[0].markdown(f"{tag} `{a['filename']}` · {a.get('chars', 0)} 字")
+            if rc[1].button("✕", key=f"rm_{a['id']}", help="移除该附件"):
+                st.session_state.pending_attachments = [
+                    x for x in st.session_state.pending_attachments
+                    if x["id"] != a["id"]
+                ]
+                st.rerun()
+
+if st.session_state.pending_attachments:
+    attach_row[1].caption(f"📎 {len(st.session_state.pending_attachments)} 个附件待发送")
+
 # 聊天输入
-disabled = st.session_state.streaming or bool(st.session_state.editing_msg_id)
-user_input = st.chat_input("输入消息开始聊天…", disabled=disabled)
-if user_input and not disabled:
+user_input = st.chat_input("输入消息开始聊天…", disabled=chat_disabled)
+if user_input and not chat_disabled:
     ensure_conversation()
     start_streaming(user_input, regenerate=False)

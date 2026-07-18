@@ -36,11 +36,17 @@ class Settings:
     data_dir: Path = BASE_DIR / "data"
     db_path: Path = data_dir / "chatbot.db"
     avatars_dir: Path = data_dir / "avatars"
+    files_dir: Path = data_dir / "files"
+
+    # 文件上传
+    max_file_size: int = int(os.getenv("MAX_FILE_SIZE_MB", "8")) * 1024 * 1024
+    max_file_chars: int = int(os.getenv("MAX_FILE_CHARS", "20000"))
 
     def ensure_dirs(self) -> None:
         """启动时确保数据目录存在。"""
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.avatars_dir.mkdir(parents=True, exist_ok=True)
+        self.files_dir.mkdir(parents=True, exist_ok=True)
 
 
 settings = Settings()
