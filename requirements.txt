@@ -1,0 +1,10 @@
+# 与 project-a 保持一致的技术栈，新增 python-multipart（头像上传）与 Pillow（头像处理）
+fastapi>=0.110
+uvicorn>=0.29
+openai>=1.30
+streamlit>=1.43
+requests>=2.31
+python-dotenv>=1.0
+pydantic>=2.6
+python-multipart>=0.0.9
+Pillow>=10.0
