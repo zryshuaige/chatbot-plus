@@ -1,6 +1,10 @@
 '''聊天路由：SSE 流式对话 + 自动命名。
 SSE 事件类型：token / usage / done / error，前端按行解析 data: ...'''
+import base64
 import json
+import uuid
+from io import BytesIO
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter
@@ -10,9 +14,146 @@ from starlette.responses import StreamingResponse
 import db
 from config import settings
 from context import build_llm_messages
-from llm import generate_title, stream_chat
+from llm import edit_image, generate_image, generate_title, stream_chat
 
 router = APIRouter()
+
+# 图片任务代号 -> 处理方式。这些任务不走文本对话流，直接调专用画图/编辑模型。
+IMAGE_TASKS = {"image_gen", "image_edit"}
+
+# 图片扩展名 -> MIME（构造 data URL 用）
+_IMG_MIME = {
+    "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+    "gif": "image/gif", "webp": "image/webp", "bmp": "image/bmp",
+}
+# 大图缩放上限：超过该边长的图片按比例缩小，避免 base64 撑爆请求体 /
+# 触发服务商尺寸上限（OpenAI 推荐 1568）。PIL 不可用或失败则回退原图。
+_IMG_MAX_SIDE = 1568
+
+
+def _maybe_downscale(raw: bytes, mime: str, filename: str) -> tuple[bytes, str]:
+    """超大图片按 _IMG_MAX_SIDE 等比缩放；失败回退原图。"""
+    try:
+        from PIL import Image  # 延迟导入：仅处理图片时才需要
+        img = Image.open(BytesIO(raw))
+        if max(img.size) <= _IMG_MAX_SIDE:
+            return raw, mime
+        img.thumbnail((_IMG_MAX_SIDE, _IMG_MAX_SIDE))
+        ext = (filename or "").rsplit(".", 1)[-1].lower()
+        fmt, out_mime = ("PNG", "image/png") if ext == "png" else ("JPEG", "image/jpeg")
+        if fmt == "JPEG" and img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        buf = BytesIO()
+        img.save(buf, format=fmt)
+        return buf.getvalue(), out_mime
+    except Exception:
+        return raw, mime
+
+
+def _image_url_parts(file_ids: list[str]) -> list[dict]:
+    """把图片文件读成 base64 data URL，组装成 OpenAI 多模态 image_url 片段。
+    文本类/读取出错/非图片一律跳过。"""
+    parts: list[dict] = []
+    for fr in db.get_files(file_ids):
+        if fr.get("kind") != "image":
+            continue
+        try:
+            raw = Path(fr["path"]).read_bytes()
+        except Exception:
+            continue
+        ext = (fr.get("filename") or "").rsplit(".", 1)[-1].lower()
+        mime = _IMG_MIME.get(ext, "image/png")
+        raw, mime = _maybe_downscale(raw, mime, fr.get("filename") or "")
+        b64 = base64.b64encode(raw).decode("ascii")
+        parts.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime};base64,{b64}"},
+        })
+    return parts
+
+
+def _save_image_bytes(raw: bytes, prefix: str = "gen") -> dict:
+    """把生成/编辑得到的图片字节落盘并入库，返回附件元数据。
+    用 PIL 探测真实扩展名，无法识别时按 png 存储。"""
+    ext = "png"
+    try:
+        from PIL import Image
+        fmt = Image.open(BytesIO(raw)).format or ""
+        ext = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp", "GIF": "gif",
+               "BMP": "bmp"}.get(fmt.upper(), "png")
+    except Exception:
+        ext = "png"
+    save_name = f"{prefix}_{uuid.uuid4().hex[:12]}.{ext}"
+    save_path = settings.files_dir / save_name
+    save_path.write_bytes(raw)
+    fid = db.add_file(
+        filename=save_name, kind="image", size=len(raw),
+        chars=0, text="", path=str(save_path),
+    )
+    return {"file_id": fid, "filename": save_name, "kind": "image", "chars": 0}
+
+
+def _last_user_image_bytes(last_user: dict) -> bytes:
+    """取最后一条用户消息携带的第一张图片附件的字节；无则返回 b''。"""
+    if not last_user:
+        return b""
+    for a in (last_user.get("attachments") or []):
+        if a.get("kind") == "image" and a.get("file_id"):
+            fr = db.get_file(a["file_id"])
+            if fr and fr.get("path"):
+                try:
+                    return Path(fr["path"]).read_bytes()
+                except Exception:
+                    pass
+    return b""
+
+
+def _image_event_stream(conv: dict, last_user: dict, user_mid: str):
+    """图片生成/编辑任务的 SSE 流：start -> token(说明) -> image(附件元数据)
+    -> usage -> done。生成结果落盘入库，作为助手消息的图片附件下发。
+
+    与文本流共用前端协议：前端把 token 拼进 buffer 作为助手正文，
+    image 事件携带的 attachments 由前端在 finalize 时随助手消息一并落库与展示。
+    """
+
+    async def gen():
+        def emit(obj):
+            return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
+
+        yield emit({"type": "start", "user_message_id": user_mid})
+        try:
+            prompt = (last_user.get("content") or "").strip() if last_user else ""
+            task = conv.get("task")
+            if task == "image_edit":
+                src = _last_user_image_bytes(last_user)
+                if not src:
+                    yield emit({"type": "error",
+                                "message": "编辑图片需要先上传一张原图：请在输入框点附件按钮上传图片，再描述修改要求。"})
+                    return
+                if not prompt:
+                    yield emit({"type": "error", "message": "请描述你想对图片做的修改，例如“换背景为海边落日”。"})
+                    return
+                raw = edit_image(prompt, src, settings.image_size)
+                note = "🖼️ 已按你的要求编辑图片，结果见下方预览（点击可看大图/下载）。"
+            else:  # image_gen
+                if not prompt:
+                    yield emit({"type": "error", "message": "请输入想生成的图片描述，或点击下方提示词模版。"})
+                    return
+                raw = generate_image(prompt, settings.image_size)
+                note = "🎨 已生成图片，结果见下方预览（点击可看大图/下载）。"
+
+            att = _save_image_bytes(raw, prefix="edit" if task == "image_edit" else "gen")
+            # 说明文字作为助手正文（让前端 buffer 收到它）
+            yield emit({"type": "token", "content": note})
+            # 生成图作为助手消息的附件下发
+            yield emit({"type": "image", "attachments": [att]})
+            yield emit({"type": "usage", "compressed": False,
+                        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+            yield emit({"type": "done"})
+        except Exception as e:
+            yield emit({"type": "error", "message": str(e)})
+
+    return gen()
 
 
 class ChatRequest(BaseModel):
@@ -59,6 +200,17 @@ async def chat(req: ChatRequest):
 
     # 把“最后一条用户消息”所附文件的正文拼进上下文（重新生成时同样生效）
     last_user = next((m for m in reversed(messages) if m["role"] == "user"), None)
+
+    # ===== 图片生成/编辑任务：走专用画图模型，不走文本对话流 =====
+    # 复用同一 /chat 接口与 SSE 协议：start -> token(一句说明) -> usage -> done，
+    # 生成结果作为“助手消息的图片附件”下发（前端附件预览直接展示）。
+    # 重新生成同样生效：复用 last_user 的 prompt 与（编辑任务的）原图。
+    if conv.get("task") in IMAGE_TASKS:
+        return StreamingResponse(
+            _image_event_stream(conv, last_user, user_mid),
+            media_type="text/event-stream",
+        )
+
     if last_user:
         fids = [a.get("file_id") for a in (last_user.get("attachments") or [])
                 if a.get("file_id")]
@@ -72,6 +224,23 @@ async def chat(req: ChatRequest):
                 last_user["content"] = (last_user.get("content", "") or "") + "\n\n" + aug
 
     llm_messages, compressed = await build_llm_messages(conv, messages, threshold, keep_turns)
+
+    # 多模态：把最后一条用户消息携带的图片以 image_url 片段注入 content。
+    # 文本附件上文已拼进 content；图片此前被 fr.get("text") 过滤掉、模型根本看不到，
+    # 这里转成 OpenAI 多模态格式（content 由字符串变为 [text, image_url, ...]），
+    # 视觉模型才能真正"看到"图。在压缩/估算之后做，不影响 token 估算与摘要。
+    # 注意：需选用支持视觉的模型，否则 API 会报错并经 error 事件透传给前端。
+    if last_user:
+        img_fids = [a["file_id"] for a in (last_user.get("attachments") or [])
+                    if a.get("kind") == "image" and a.get("file_id")]
+        if img_fids:
+            img_parts = _image_url_parts(img_fids)
+            if img_parts:
+                for m in reversed(llm_messages):
+                    if m.get("role") == "user":
+                        txt = m.get("content") or ""
+                        m["content"] = [{"type": "text", "text": txt}, *img_parts]
+                        break
 
     # step03：流式请求大模型并通过 SSE 推给前端
     async def event_stream():

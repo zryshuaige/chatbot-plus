@@ -94,11 +94,13 @@ class SaveMessageRequest(BaseModel):
     content: str
     tokens: int = 0
     model: str = ""
+    attachments: Optional[list] = None  # 助手消息可携带附件（如图片生成结果）
 
 
 @router.post("/conversations/{cid}/messages")
 def save_message(cid: str, req: SaveMessageRequest):
-    mid = db.add_message(cid, req.role, req.content, req.tokens, req.model)
+    mid = db.add_message(cid, req.role, req.content, req.tokens, req.model,
+                         attachments=req.attachments)
     return {"code": 200, "id": mid, "message": db.list_messages(cid)[-1]}
 
 

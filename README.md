@@ -48,6 +48,7 @@ chatbot-plus 是一个基于 LLM 的多轮对话应用，主打**安全、个性
 | 👤 个性化 | 头像上传 | 上传图片存本地，气泡内展示，emoji 兜底 |
 | 🏷️ 个性化 | 历史自动命名 | 首轮问答后 LLM 生成 ≤12 字标题，可手动改名 |
 | 🧭 个性化 | 任务系统提示词 | 日常闲聊/学术研究/代码编程/文案写作/翻译润色/学习辅导，可自定义覆盖 |
+| 🖼️ 增强 | 图片生成/编辑 | 专用画图模型（Z-Image-Turbo / Qwen-Image-Edit-2509），内置丰富提示词模版；编辑任务上传原图即可改图 |
 | 🎨 个性化 | UI 风格切换 | 简约浅色/深色科技/护眼绿/活力紫，CSS 注入即时切换 |
 | 🧠 核心 | 上下文压缩 | 超阈值时把旧消息压成摘要，保留最近 N 轮原文，全量历史仍可查看 |
 | ✍️ 增强 | Markdown + 代码高亮 + 复制 | 代码块用 `st.code`（自带复制），prose 用 `st.markdown` |
@@ -92,17 +93,22 @@ pip install -r requirements.txt
 
 # 1) 配置密钥：按仓库内的配置模板填入自己的 API Key
 
-# 2) 启动后端（终端 A）
-cd backend
-python3 main.py
-#   或：uvicorn main:app --reload --port 8002
-
-# 3) 启动前端（终端 B）
-cd frontend
-streamlit run app.py --server.port 8502
+# 2) 一键启动（后端 + 前端，自动刷新到最新代码）
+./run.sh
+#   停止：./stop.sh   日志：tail -f logs/backend.log logs/frontend.log
+#   再次运行 ./run.sh 即可重启刷新
 ```
 
-浏览器打开 `http://localhost:8502`，左侧「新建对话」或在底部直接输入即开始聊天。💬
+或分别手动启动：
+
+```bash
+# 后端（终端 A）
+cd backend && python3 main.py
+# 前端（终端 B）
+cd frontend && streamlit run app.py --server.port 8502
+```
+
+浏览器打开 `http://localhost:8502`，左侧「新建对话」选择任务类型或在底部直接输入即开始聊天。💬
 
 ## 🔧 关键设计
 

@@ -4,7 +4,7 @@
 import shutil
 import uuid
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Query
 from fastapi.responses import FileResponse
 
 import db
@@ -81,9 +81,15 @@ async def upload(files: list[UploadFile] = File(...)):
 
 
 @router.get("/files/{file_id}")
-def download(file_id: str):
-    """下载原始文件。"""
+def download(file_id: str, inline: bool = Query(default=False)):
+    """下载原始文件。
+
+    inline=True 时不带 filename（Content-Disposition 走 inline），供前端
+    <img src> / 点击缩略图在新标签页直接显示原图，而非强制下载。
+    """
     f = db.get_file(file_id)
     if not f:
         raise HTTPException(404, "文件不存在")
+    if inline:
+        return FileResponse(f["path"])
     return FileResponse(f["path"], filename=f["filename"])

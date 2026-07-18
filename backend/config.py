@@ -24,6 +24,11 @@ class Settings:
     models: list[str] = _split_csv(os.getenv("MODELS", ""))
     utility_model: str = os.getenv("UTILITY_MODEL", "Qwen/Qwen2.5-7B-Instruct")
 
+    # 图片生成/编辑：专用模型，由“图片生成/编辑图片”任务强制使用，与会话所选文本模型无关
+    image_gen_model: str = os.getenv("IMAGE_GEN_MODEL", "Tongyi-MAI/Z-Image-Turbo")
+    image_edit_model: str = os.getenv("IMAGE_EDIT_MODEL", "Qwen/Qwen-Image-Edit-2509")
+    image_size: str = os.getenv("IMAGE_SIZE", "1024x1024")
+
     # 服务端口
     backend_port: int = int(os.getenv("BACKEND_PORT", "8002"))
     frontend_port: int = int(os.getenv("FRONTEND_PORT", "8502"))

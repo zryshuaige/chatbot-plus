@@ -1,8 +1,10 @@
 '''大模型交互层：统一管理 AsyncOpenAI 客户端、模型注册表、
 token 估算，以及“自动命名 / 上下文压缩”这类轻量调用。'''
+import base64
 import re
 from typing import AsyncIterator
 
+import requests
 from openai import AsyncOpenAI
 
 from config import settings
@@ -105,3 +107,74 @@ async def summarize_messages(
         temperature=0.2,
     )
     return (resp.choices[0].message.content or "").strip()
+
+
+# ---------------- 图片生成 / 编辑 ----------------
+def _image_api_url() -> str:
+    """SiliconFlow 图片生成接口（文生图 / 图片编辑共用同一端点）。"""
+    return f"{settings.base_url.rstrip('/')}/images/generations"
+
+
+def _gen_headers() -> dict:
+    return {
+        "Authorization": f"Bearer {settings.api_key}",
+        "Content-Type": "application/json",
+    }
+
+
+def _extract_image_bytes(resp_json: dict) -> bytes:
+    """从 /images/generations 响应里取出第一张图的二进制。
+    优先下载 images[*].url；若直接返回 b64_json 则解码。"""
+    images = resp_json.get("images") or []
+    if not images:
+        raise RuntimeError(f"图片接口未返回图片，原始响应：{resp_json}")
+    img = images[0]
+    if img.get("b64_json"):
+        return base64.b64decode(img["b64_json"])
+    url = img.get("url")
+    if not url:
+        raise RuntimeError(f"图片接口返回项无 url/b64_json：{img}")
+    r = requests.get(url, timeout=60)
+    r.raise_for_status()
+    return r.content
+
+
+def generate_image(prompt: str, size: str = None) -> bytes:
+    """文生图：调用 image_gen_model，返回生成的图片二进制。"""
+    payload = {
+        "model": settings.image_gen_model,
+        "prompt": prompt,
+        "image_size": size or settings.image_size,
+        "batch_size": 1,
+    }
+    resp = requests.post(_image_api_url(), json=payload,
+                         headers=_gen_headers(), timeout=120)
+    try:
+        data = resp.json()
+    except ValueError:
+        raise RuntimeError(f"图片生成接口返回非 JSON（HTTP {resp.status_code}）：{resp.text[:200]}")
+    if resp.status_code >= 400:
+        raise RuntimeError(f"图片生成失败（HTTP {resp.status_code}）：{data}")
+    return _extract_image_bytes(data)
+
+
+def edit_image(prompt: str, image_bytes: bytes, size: str = None) -> bytes:
+    """图片编辑：以原图 + 指令调用 image_edit_model，返回编辑后的图片二进制。
+    原图以 base64 data URL 放入 image 字段。"""
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+    payload = {
+        "model": settings.image_edit_model,
+        "prompt": prompt,
+        "image": f"data:image/png;base64,{b64}",
+        "image_size": size or settings.image_size,
+        "batch_size": 1,
+    }
+    resp = requests.post(_image_api_url(), json=payload,
+                         headers=_gen_headers(), timeout=120)
+    try:
+        data = resp.json()
+    except ValueError:
+        raise RuntimeError(f"图片编辑接口返回非 JSON（HTTP {resp.status_code}）：{resp.text[:200]}")
+    if resp.status_code >= 400:
+        raise RuntimeError(f"图片编辑失败（HTTP {resp.status_code}）：{data}")
+    return _extract_image_bytes(data)

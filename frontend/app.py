@@ -144,6 +144,7 @@ def init_state():
         "stream_usage": None,
         "stream_error": None,
         "stream_model": "",
+        "stream_attachments": [],   # 图片任务：助手消息携带的图片附件（由 image 事件下发）
         "last_usage": None,        # 最近一次 token 用量（展示）
         "editing_msg_id": None,    # 正在编辑的用户消息 id
         "prefs_loaded": False,
@@ -187,6 +188,23 @@ def pick_suggestions(n: int = 4) -> list:
 
 def send_suggestion(text: str):
     """点击灵感问题：直接创建会话并发送。"""
+    ensure_conversation()
+    start_streaming(text, regenerate=False)
+
+
+def _current_task_obj():
+    """当前任务对象（优先 current_task，新建时回退 new_task）。"""
+    key = st.session_state.current_task or st.session_state.new_task
+    return next((t for t in st.session_state.tasks if t["key"] == key), None)
+
+
+def _is_image_task() -> bool:
+    t = _current_task_obj()
+    return bool(t and t.get("model") in ("image_gen", "image_edit"))
+
+
+def send_template(text: str):
+    """点击提示词模版：创建会话并发送（与 send_suggestion 同路径）。"""
     ensure_conversation()
     start_streaming(text, regenerate=False)
 
@@ -345,6 +363,7 @@ def start_streaming(query: str, regenerate: bool = False, file_metas: list = Non
     st.session_state.stream_buffer = ""
     st.session_state.stream_usage = None
     st.session_state.stream_error = None
+    st.session_state.stream_attachments = []
     st.session_state.stream_model = st.session_state.current_model
     st.session_state.streaming = True
     st.rerun()
@@ -357,11 +376,14 @@ def finalize_streaming():
     usage = st.session_state.stream_usage or {}
     tokens = usage.get("total_tokens", 0)
     model = st.session_state.stream_model
-    if buf.strip():
-        saved = api.save_message(cid, "assistant", buf, tokens=tokens, model=model)
+    atts = st.session_state.stream_attachments or []
+    if buf.strip() or atts:
+        saved = api.save_message(cid, "assistant", buf, tokens=tokens, model=model,
+                                 attachments=atts or None)
         st.session_state.messages.append(
             {"id": saved["id"], "role": "assistant", "content": buf,
-             "tokens": tokens, "model": model}
+             "tokens": tokens, "model": model,
+             "attachments": _coerce_atts(atts)}
         )
     st.session_state.last_usage = usage
     st.session_state.streaming = False
@@ -369,6 +391,7 @@ def finalize_streaming():
     st.session_state.stop_event = None
     st.session_state.stream_buffer = ""
     st.session_state.stream_usage = None
+    st.session_state.stream_attachments = []
     maybe_auto_name()
 
 
@@ -428,6 +451,10 @@ def streaming_fragment():
                 msgs[-1]["id"] = umid
         elif t == "token":
             st.session_state.stream_buffer += evt.get("content", "")
+        elif t == "image":
+            # 图片生成/编辑：助手消息携带的图片附件，finalize 时随消息落库与展示
+            for a in (evt.get("attachments") or []):
+                st.session_state.stream_attachments.append(a)
         elif t == "usage":
             st.session_state.stream_usage = evt
         elif t in ("done", "stopped", "error"):
@@ -596,6 +623,10 @@ with st.sidebar:
     st.selectbox("任务类型", list(task_options.keys()),
                  format_func=lambda k: task_options.get(k, k),
                  key="new_task")
+    # 图片任务：模型由专用画图模型决定，隐藏/禁用文本模型选择意义不大，仅提示。
+    _nt = next((t for t in st.session_state.tasks if t["key"] == st.session_state.new_task), None)
+    if _nt and _nt.get("model") in ("image_gen", "image_edit"):
+        st.caption("⚙️ 该任务使用专用画图模型，下方模型选项不生效。")
     st.selectbox("模型", st.session_state.models, key="new_model")
     if st.button("➕ 新建对话", use_container_width=True):
         new_conversation()
@@ -638,7 +669,7 @@ with st.sidebar:
 if st.session_state.get("_attach_err"):
     st.error(f"📎 {st.session_state['_attach_err']}")
     del st.session_state["_attach_err"]
-
+    
 if st.session_state.current_cid:
     header = st.columns([7, 2, 1])
     # 切换会话时重置标题输入框
@@ -687,6 +718,29 @@ else:
                                    type="secondary"):
                 send_suggestion(s)
         # 灵感卡片样式由注入脚本据 sugg 列表自动打类（见底部 components.html）
+
+# 图片生成/编辑任务：空会话时展示提示词模版卡片，点击即发送
+if (not st.session_state.streaming
+        and not st.session_state.editing_msg_id
+        and _is_image_task()
+        and not st.session_state.messages):
+    t = _current_task_obj() or {}
+    st.markdown(f"#### {t.get('icon','🎨')} {t.get('name','图片生成')} 提示词模版")
+    if t.get("key") == "image_edit":
+        st.caption("📎 先在输入框上传一张原图，再点下方模版或自行描述修改要求。")
+    else:
+        st.caption("💡 点模版直接生成，也可在输入框自行描述（主体+环境+光线+风格）。")
+    st.caption("⚙️ 此任务自动使用专用画图模型，与会话所选文本模型无关。")
+    tpls = t.get("templates") or []
+    cols = st.columns(2)
+    for i, tp in enumerate(tpls):
+        if cols[i % 2].button(f"{tp['title']}", key=f"tpl_{i}",
+                              use_container_width=True, type="secondary",
+                              help=tp["prompt"]):
+            send_template(tp["prompt"])
+    # 模版卡片复用灵感卡片样式：把标题喂给注入脚本打类
+    _tpl_titles = [tp["title"] for tp in tpls]
+    st.session_state["_tpl_titles"] = _tpl_titles
 
 # 渲染历史消息
 user_avatar_path = prefs.get("avatar_path", "")
@@ -771,9 +825,18 @@ _ATTACH_TYPES = ["txt", "md", "markdown", "py", "js", "ts", "java", "c", "cpp", 
 
 # 注入主文档脚本：复制委托、流式光标/停止胶囊、灵感卡片样式。
 # 必须用 components.html（iframe 带 allow-scripts + allow-same-origin），st.html 会被 DOMPurify 清掉 <script>。
-components.html(_cp_components_js(st.session_state.suggestions), height=0)
+# 卡片样式同时作用于灵感问题与图片任务提示词模版（按按钮文本匹配）。
+_sugg_for_cards = list(st.session_state.suggestions or [])
+_sugg_for_cards += list(st.session_state.get("_tpl_titles") or [])
+components.html(_cp_components_js(_sugg_for_cards), height=0)
 
-prompt = st.chat_input("输入消息开始聊天…", accept_file="multiple",
+# 聊天输入占位符随任务调整：图片编辑提示上传原图
+_cto = _current_task_obj()
+_in_ph = ("描述修改要求（需先上传原图）…"
+          if (_cto and _cto.get("key") == "image_edit")
+          else "输入消息开始聊天…")
+
+prompt = st.chat_input(_in_ph, accept_file="multiple",
                        file_type=_ATTACH_TYPES, disabled=chat_disabled)
 if prompt and not chat_disabled:
     # accept_file="multiple" 时返回 ChatInputValue（含 .text / .files）

@@ -152,8 +152,21 @@ hr { border-color: var(--border) !important; opacity: .8; }
   display: inline-flex; align-items: center; gap: .3rem;
   font-size: .78rem; padding: .15rem .55rem; margin: .15rem .25rem 0 0;
   border-radius: 999px; background: rgba(0,0,0,.06); opacity: .92;
+  text-decoration: none; color: inherit; cursor: pointer;
 }
-.cp-msg-row.user .cp-attach-chip { background: rgba(255,255,255,.22); }
+.cp-msg-row.user .cp-attach-chip { background: rgba(255,255,255,.22); color: var(--user-bubble-fg); }
+.cp-attach-chip:hover { opacity: 1; }
+
+/* 附件预览区：图片缩略图 + chip 容器 */
+.cp-attaches { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .4rem; align-items: center; }
+.cp-attach-img {
+  display: block; width: 120px; height: 120px; border-radius: 10px; overflow: hidden;
+  border: 1px solid rgba(0,0,0,.12); box-shadow: 0 1px 4px rgba(0,0,0,.12);
+  transition: transform .15s ease, box-shadow .15s ease; cursor: zoom-in; line-height: 0;
+}
+.cp-attach-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cp-attach-img:hover { transform: scale(1.03); box-shadow: 0 3px 12px rgba(0,0,0,.2); }
+.cp-msg-row.user .cp-attach-img { border-color: rgba(255,255,255,.35); box-shadow: 0 1px 4px rgba(0,0,0,.25); }
 
 /* 消息间留白，避免按钮挤在一起 */
 [data-testid="stChatMessage"] + div,

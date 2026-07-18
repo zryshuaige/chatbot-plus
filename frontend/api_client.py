@@ -112,9 +112,13 @@ def truncate_messages(cid: str, message_id: str, mode: str = "after"):
     return _post(f"/conversations/{cid}/truncate", {"message_id": message_id, "mode": mode})
 
 
-def save_message(cid: str, role: str, content: str, tokens: int = 0, model: str = ""):
-    return _post(f"/conversations/{cid}/messages",
-                 {"role": role, "content": content, "tokens": tokens, "model": model})
+def save_message(cid: str, role: str, content: str, tokens: int = 0,
+                 model: str = "", attachments: Optional[list] = None):
+    """落库一条消息。attachments 可选，用于助手消息携带图片生成结果等附件。"""
+    payload = {"role": role, "content": content, "tokens": tokens, "model": model}
+    if attachments is not None:
+        payload["attachments"] = attachments
+    return _post(f"/conversations/{cid}/messages", payload)
 
 
 def export_conversation(cid: str, fmt: str = "md"):

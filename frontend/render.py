@@ -137,15 +137,41 @@ def _normalize_attachments(attachments) -> list:
     return [a for a in attachments if isinstance(a, dict)]
 
 
+def _file_url(file_id: str, inline: bool = False) -> str:
+    """后端下载接口的完整 URL。inline=True 用于图片直接显示（Content-Disposition: inline）。"""
+    if not file_id:
+        return ""
+    qs = "?inline=1" if inline else ""
+    return f"http://127.0.0.1:{_backend_port()}/files/{file_id}{qs}"
+
+
 def _attach_chips(attachments) -> str:
+    """渲染附件区：图片显示可点击缩略图（点开看原图），其他文件显示可点击文件名 chip（点击下载）。"""
     atts = _normalize_attachments(attachments)
     if not atts:
         return ""
-    chips = "".join(
-        f'<span class="cp-attach-chip">📎 {_html.escape(a.get("filename", "文件"))}</span>'
-        for a in atts
-    )
-    return chips
+    items: list[str] = []
+    for a in atts:
+        filename = a.get("filename", "文件")
+        kind = a.get("kind", "")
+        fid = a.get("file_id", "")
+        safe = _html.escape(filename)
+        if kind == "image" and fid:
+            url = _file_url(fid, inline=True)
+            items.append(
+                f'<a class="cp-attach-img" href="{url}" target="_blank" rel="noopener" title="{safe}">'
+                f'<img src="{url}" alt="{safe}" loading="lazy"></a>'
+            )
+        else:
+            dl = _file_url(fid) if fid else ""
+            if dl:
+                items.append(
+                    f'<a class="cp-attach-chip" href="{dl}" target="_blank" rel="noopener" '
+                    f'download="{safe}">📎 {safe}</a>'
+                )
+            else:
+                items.append(f'<span class="cp-attach-chip">📎 {safe}</span>')
+    return f'<div class="cp-attaches">{"".join(items)}</div>'
 
 
 def user_bubble_html(content: str, avatar_path: str,
