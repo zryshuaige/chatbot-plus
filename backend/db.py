@@ -121,7 +121,8 @@ def create_conversation(task: str, model: str, title: str = "新对话") -> str:
 
 
 def list_conversations(search: Optional[str] = None) -> list[dict]:
-    """按更新时间倒序；置顶优先。可按标题/内容关键词搜索。"""
+    """按更新时间倒序；置顶优先。可按标题/内容关键词搜索。
+    排除没有任何消息的空会话（不再保留空白会话）。"""
     with get_conn() as conn:
         if search:
             like = f"%{search}%"
@@ -129,14 +130,19 @@ def list_conversations(search: Optional[str] = None) -> list[dict]:
                 """
                 SELECT DISTINCT c.* FROM conversations c
                 LEFT JOIN messages m ON m.conversation_id = c.id
-                WHERE c.title LIKE ? OR m.content LIKE ?
+                WHERE (c.title LIKE ? OR m.content LIKE ?)
+                  AND EXISTS (SELECT 1 FROM messages m2 WHERE m2.conversation_id = c.id)
                 ORDER BY c.pinned DESC, c.updated_at DESC
                 """,
                 (like, like),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM conversations ORDER BY pinned DESC, updated_at DESC"
+                """
+                SELECT c.* FROM conversations c
+                WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)
+                ORDER BY c.pinned DESC, c.updated_at DESC
+                """
             ).fetchall()
         return [dict(r) for r in rows]
 

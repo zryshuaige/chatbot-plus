@@ -163,6 +163,91 @@ hr { border-color: var(--border) !important; opacity: .8; }
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ============ 流式输出动画 ============ */
+/* 思考中三点跳动 */
+.cp-thinking { display: inline-flex; gap: 7px; align-items: center; padding: .35rem .1rem; }
+.cp-thinking span {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+  display: inline-block; opacity: .45; animation: cp-bounce 1.2s infinite ease-in-out both;
+}
+.cp-thinking span:nth-child(2) { animation-delay: .15s; }
+.cp-thinking span:nth-child(3) { animation-delay: .30s; }
+@keyframes cp-bounce { 0%,80%,100% { transform: scale(.55); opacity: .4; } 40% { transform: scale(1); opacity: 1; } }
+/* 流式光标：气泡末尾闪烁 */
+[data-testid="stChatMessage"].cp-streaming .stMarkdown:last-of-type p::after {
+  content: ""; display: inline-block; width: .55em; height: 1.05em; background: var(--accent);
+  margin-left: 3px; vertical-align: -.18em; border-radius: 1px;
+  animation: cp-blink 1s steps(2, start) infinite;
+}
+@keyframes cp-blink { 0%,50% { opacity: 1; } 50.01%,100% { opacity: 0; } }
+/* 流式气泡入场 */
+[data-testid="stChatMessage"].cp-streaming,
+[data-testid="stChatMessage"].cp-thinking-bubble { animation: cp-pop .22s ease; }
+@keyframes cp-pop { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+/* 停止按钮：胶囊 + 脉冲圆点 */
+.cp-stop-btn {
+  border-radius: 999px !important; padding: .28rem .9rem !important;
+  font-size: .82rem !important; border: 1px solid var(--border) !important;
+  background: var(--surface) !important; color: var(--text) !important;
+  display: inline-flex !important; align-items: center !important; gap: .4rem !important;
+}
+.cp-stop-btn::before {
+  content: ""; width: 8px; height: 8px; border-radius: 50%; background: #e5484d;
+  animation: cp-pulse 1.2s infinite ease-in-out;
+}
+@keyframes cp-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(229,72,77,.45); } 50% { box-shadow: 0 0 0 5px rgba(229,72,77,0); } }
+
+/* ============ 助手消息操作栏 ============ */
+.cp-actions { display: inline-flex; align-items: center; gap: .35rem; }
+.cp-act {
+  font-size: .78rem; color: var(--text-muted); background: transparent; border: none;
+  padding: .25rem .55rem; border-radius: 8px; cursor: pointer; display: inline-flex;
+  align-items: center; gap: .3rem; transition: all .15s ease;
+}
+.cp-act:hover { background: var(--accent-soft); color: var(--accent); }
+.cp-act.cp-copied { color: #2f9e44; }
+/* hover 才显示整条操作栏（:has 作用域；不支持 :has 时退化为常显） */
+[data-testid="stChatMessage"] [data-testid="stHorizontalBlock"]:has(.cp-actions) { opacity: .5; transition: opacity .18s ease; }
+[data-testid="stChatMessage"]:hover [data-testid="stHorizontalBlock"]:has(.cp-actions) { opacity: 1; }
+.cp-meta { font-size: .74rem; color: var(--text-muted); text-align: right; opacity: .85; }
+
+/* ============ token 用量胶囊 ============ */
+.cp-usage { display: flex; flex-wrap: wrap; gap: .4rem; padding: .25rem 0; }
+.cp-pill {
+  display: inline-flex; align-items: center; gap: .3rem; font-size: .74rem;
+  padding: .2rem .6rem; border-radius: 999px; background: var(--accent-soft);
+  color: var(--text); border: 1px solid var(--border);
+}
+.cp-pill.cp-pill-accent { background: var(--accent); color: #fff; border-color: var(--accent); }
+.cp-pill.cp-pill-warn { background: rgba(229,159,0,.14); color: #b58105; border-color: rgba(229,159,0,.3); }
+
+/* ============ 欢迎页 ============ */
+.cp-hero { text-align: center; padding: 2.4rem 1rem 1.2rem; }
+.cp-hero-logo {
+  width: 64px; height: 64px; border-radius: 18px; margin: 0 auto .9rem;
+  display: flex; align-items: center; justify-content: center; font-size: 2rem;
+  background: var(--accent-soft); border: 1px solid var(--border); box-shadow: var(--shadow);
+}
+.cp-hero h2 { margin: 0 0 .35rem; font-weight: 650; }
+.cp-hero p { margin: 0; opacity: .65; font-size: .92rem; }
+/* 灵感卡片：JS 按文本匹配给二级按钮打 cp-sugg-card 类 */
+.cp-sugg-card {
+  text-align: left !important; height: auto !important; min-height: 60px !important;
+  padding: .8rem 1rem !important; border-radius: 14px !important;
+  border: 1px solid var(--border) !important; background: var(--surface) !important;
+  color: var(--text) !important; white-space: normal !important; line-height: 1.4 !important;
+  transition: all .15s ease !important;
+}
+.cp-sugg-card:hover { transform: translateY(-2px); border-color: var(--accent) !important; box-shadow: var(--shadow) !important; }
+.cp-sugg-ic { margin-right: .5rem; }
+
+/* ============ 侧边栏会话项小字 ============ */
+.cp-conv-meta { font-size: .7rem; color: var(--text-muted); padding: 0 .15rem .3rem; margin-top: -.2rem; opacity: .8; }
+
+/* ============ JS 注入用 iframe（components.html, height=0）：确保不占版面 ============ */
+[data-testid="stIFrame"] { min-height: 0 !important; line-height: 0; }
+[data-testid="stIFrame"] iframe { border: 0; }
 """
 
 # 各主题覆盖段（变量 + 少量组件规则），放在组件样式之后以生效

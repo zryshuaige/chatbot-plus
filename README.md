@@ -1,6 +1,6 @@
 # 💬 chatbot-plus
 
-> 一个聚焦「密钥安全 · 个性化 · 上下文压缩 · 体验增强」的多轮对话聊天机器人，开箱即用，数据全本地。
+> 一个聚焦「个性化 · 上下文压缩 · 体验增强」的多轮对话聊天机器人，开箱即用，数据全本地。
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python">
