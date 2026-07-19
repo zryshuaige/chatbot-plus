@@ -838,11 +838,18 @@ for m in st.session_state.messages:
             _atts_html = attachments_html(m.get("attachments"))
             if _atts_html:
                 st.markdown(_atts_html, unsafe_allow_html=True)
-            info = []
-            if m.get("model"):
-                info.append(m["model"])
             _img_n = sum(1 for a in (m.get("attachments") or [])
                          if a.get("kind") == "image")
+            # 图片生成/编辑消息：以会话任务对应的专用画图模型为准展示，
+            # 不信任落库的 model——早期版本曾把文本模型名误存到图片消息上，
+            # 这里按任务实时推导，修正历史脏数据（实际用的就是画图模型）。
+            if _img_n and _is_image_task():
+                shown_model = _model_id_for_task(st.session_state.current_task, "")
+            else:
+                shown_model = m.get("model", "")
+            info = []
+            if shown_model:
+                info.append(shown_model)
             if _img_n:
                 info.append(f"🖼️ {_img_n} 张图")
             elif m.get("tokens"):

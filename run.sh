@@ -47,10 +47,13 @@ BACKEND_PID=$!
 echo "${BACKEND_PID}" > "${LOG_DIR}/backend.pid"
 
 # ---- 启动前端（在 frontend/ 目录运行，日志写 logs/frontend.log）----
-echo "🎨 启动前端（streamlit，端口 ${FRONTEND_PORT}）…"
+# --server.address 127.0.0.1：仅本机访问（与后端 --host 127.0.0.1 一致）。
+# 不传该参数时 streamlit 默认绑定所有接口（tornado listen(port, None)），
+# 会把前端暴露到局域网，与“run.sh 仅本机、run_lan.sh 局域网”的约定冲突。
+echo "🎨 启动前端（streamlit，端口 ${FRONTEND_PORT}，仅本机）…"
 FRONTEND_LOG="${LOG_DIR}/frontend.log"
 nohup bash -c "cd '${ROOT}/frontend' && exec streamlit run app.py \
-    --server.port '${FRONTEND_PORT}' \
+    --server.address 127.0.0.1 --server.port '${FRONTEND_PORT}' \
     --server.headless true --browser.gatherUsageStats false" \
     > "${FRONTEND_LOG}" 2>&1 &
 FRONTEND_PID=$!

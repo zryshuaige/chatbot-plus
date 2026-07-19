@@ -90,6 +90,39 @@ section[data-testid="stSidebar"] h3 { font-weight: 600; letter-spacing: -0.01em;
 .stApp h3 { font-weight: 600; letter-spacing: -0.01em; }
 hr { border-color: var(--border) !important; opacity: .8; }
 
+/* ---------- 文本色归一化（深色主题可读性的关键修复）----------
+   Streamlit 用 styled-components 把浅色主题默认文本色（#31333F）直接内联到元素上，
+   不走 CSS 变量；仅靠 .stApp{color} 的级联穿不透这些显式着色，导致深色背景下
+   标题/正文/说明/标签一片看不清。这里按 data-testid 精准覆盖到 Streamlit 自有容器，
+   使其跟随各主题 --text / --text-muted。
+   只命中 Streamlit 容器（stHeading/stMarkdownContainer/...），不触碰 .cp-* 自定义组件，
+   避免误伤气泡/胶囊/思考点等已有配色。!important 是为压过 styled-components 的内联色。 */
+[data-testid="stHeading"],
+[data-testid="stHeading"] h1, [data-testid="stHeading"] h2,
+[data-testid="stHeading"] h3, [data-testid="stHeading"] h4,
+[data-testid="stHeading"] h5, [data-testid="stHeading"] h6,
+[data-testid="stMarkdownContainer"],
+[data-testid="stMarkdownContainer"] p,
+[data-testid="stMarkdownContainer"] li,
+[data-testid="stMarkdownContainer"] ul,
+[data-testid="stMarkdownContainer"] ol,
+[data-testid="stMarkdownContainer"] blockquote,
+[data-testid="stMarkdownContainer"] strong,
+[data-testid="stMarkdownContainer"] h1, [data-testid="stMarkdownContainer"] h2,
+[data-testid="stMarkdownContainer"] h3, [data-testid="stMarkdownContainer"] h4,
+[data-testid="stMarkdownContainer"] h5, [data-testid="stMarkdownContainer"] h6,
+[data-testid="stMarkdownContainer"] td, [data-testid="stMarkdownContainer"] th,
+[data-testid="stText"],
+[data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p,
+[data-testid="stMetricLabel"], [data-testid="stMetricValue"], [data-testid="stMetricDelta"],
+[data-testid="stExpander"] summary, [data-testid="stExpander"] summary span {
+  color: var(--text) !important;
+}
+/* 说明文字（st.caption / 模型简介等）：次要色，保持层级但仍可读 */
+[data-testid="stCaptionContainer"] { color: var(--text-muted) !important; }
+/* 链接保持强调色，不被上面 var(--text) 盖掉 */
+[data-testid="stMarkdownContainer"] a { color: var(--accent) !important; }
+
 /* ---------- 粘性顶栏（会话标题/任务/导出）：半透明材质 ----------
    app.py 用 st.container()+.cp-topbar-anchor 标记顶栏；:has 命中该容器并钉在主区顶部。
    Apple wayfinding：始终知道「我在哪个会话」，消息从下方滚入时透出材质。 */
@@ -142,12 +175,19 @@ section[data-testid="stMain"] [data-testid="stVerticalBlock"] [data-testid="stVe
 .stButton > button[kind="primary"]:active { transform: scale(0.97); }
 
 /* ---------- 输入框 ---------- */
-.stTextArea textarea, .stTextInput input {
+.stTextArea textarea, .stTextInput input,
+[data-testid="stSelectbox"] input {
   border-radius: 10px !important;
   border-color: var(--border) !important;
   background: var(--surface) !important;
+  color: var(--text) !important;           /* 深色主题下输入文字跟随 --text，否则是 #31333F 看不清 */
 }
-.stTextArea textarea:focus, .stTextInput input:focus {
+.stTextArea textarea::placeholder, .stTextInput input::placeholder,
+[data-testid="stSelectbox"] input::placeholder {
+  color: var(--text-muted) !important; opacity: 1;   /* placeholder 用次要色 */
+}
+.stTextArea textarea:focus, .stTextInput input:focus,
+[data-testid="stSelectbox"] input:focus {
   border-color: var(--accent) !important;
   box-shadow: 0 0 0 3px var(--accent-soft) !important;
 }
@@ -165,13 +205,38 @@ section[data-testid="stMain"] [data-testid="stVerticalBlock"] [data-testid="stVe
   border-radius: 16px !important;
   border: 1px solid var(--border) !important;
   background: var(--surface) !important;
+  color: var(--text) !important;           /* 深色主题下聊天输入文字可见 */
   box-shadow: var(--shadow) !important;
   transition: border-color var(--dur-press) var(--ease-out),
               box-shadow var(--dur-press) var(--ease-out) !important;
 }
+[data-testid="stChatInput"] textarea::placeholder {
+  color: var(--text-muted) !important; opacity: 1;
+}
 [data-testid="stChatInput"] textarea:focus {
   border-color: var(--accent) !important;
   box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow) !important;
+}
+
+/* ---------- 弹层 / 折叠面板：随主题，避免深色下突兀的白卡 ----------
+   popover / dialog / 下拉选项由 Streamlit 渲染到 body 下的 portal，不在 .stApp 内，
+   默认是白底深字；深色主题下虽可读但风格割裂，这里统一用 --surface/--text/--border。
+   stExpander 同理（侧边栏“个人信息/参数设置”、主区“复制全文”都用到）。 */
+[data-testid="stPopover"], [data-testid="stPopoverBody"],
+[data-testid="stDialog"], [data-testid="stDialogBody"],
+[data-testid="stSelectboxVirtualDropdown"] {
+  background: var(--surface) !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border) !important;
+}
+[data-testid="stSelectboxVirtualDropdown"] [role="option"],
+[data-testid="stSelectboxVirtualDropdown"] span { color: var(--text) !important; }
+[data-testid="stSelectboxVirtualDropdown"] [role="option"][aria-selected="true"] {
+  background: var(--accent-soft) !important;     /* 选中项高亮跟随主题 */
+}
+[data-testid="stExpander"], [data-testid="stExpanderDetails"] {
+  background: var(--surface) !important;
+  border-color: var(--border) !important;
 }
 
 /* ---------- 助手气泡（st.chat_message） ---------- */
@@ -414,6 +479,27 @@ _THEME_OVERRIDES = {
         .stApp { background: linear-gradient(180deg, #0f1419 0%, #121822 100%); }
         .cp-bubble pre { background: rgba(255,255,255,.08); }
         .cp-attach-chip { background: rgba(255,255,255,.08); }
+        /* 代码块：Streamlit 默认套用“浅色”高亮主题（深色字），在深色 --code-bg 上不可读。
+           这里自托管一套 GitHub-Dark 风格的 hljs 令牌配色，覆盖到常见 token。 */
+        .stCodeBlock pre, .stCodeBlock code { color: #c9d1d9 !important; }
+        .stCodeBlock .hljs-comment, .stCodeBlock .hljs-quote { color: #8b949e !important; }
+        .stCodeBlock .hljs-keyword, .stCodeBlock .hljs-selector-tag,
+        .stCodeBlock .hljs-deletion, .stCodeBlock .hljs-doctag { color: #ff7b72 !important; }
+        .stCodeBlock .hljs-string, .stCodeBlock .hljs-regexp,
+        .stCodeBlock .hljs-addition, .stCodeBlock .hljs-attribute { color: #a5d6ff !important; }
+        .stCodeBlock .hljs-number, .stCodeBlock .hljs-literal,
+        .stCodeBlock .hljs-symbol, .stCodeBlock .hljs-bullet { color: #79c0ff !important; }
+        .stCodeBlock .hljs-title, .stCodeBlock .hljs-section,
+        .stCodeBlock .hljs-name { color: #d2a8ff !important; }
+        .stCodeBlock .hljs-type, .stCodeBlock .hljs-built_in,
+        .stCodeBlock .hljs-builtin-name { color: #ffa657 !important; }
+        .stCodeBlock .hljs-meta, .stCodeBlock .hljs-tag { color: #8b949e !important; }
+        .stCodeBlock .hljs-link { color: #a5d6ff !important; }
+        /* markdown 内联 code（非 stCodeBlock）：深色主题下给个浅色底+深色字，保持可读 */
+        [data-testid="stMarkdownContainer"] code {
+          background: rgba(255,255,255,.10) !important;
+          color: #e6e8eb !important;
+        }
         """,
     },
     "green": {
