@@ -48,6 +48,20 @@ section[data-testid="stSidebar"] h1,
 section[data-testid="stSidebar"] h2,
 section[data-testid="stSidebar"] h3 { font-weight: 600; letter-spacing: .2px; }
 
+/* 侧边栏底部固定区：把「个人信息 / 参数设置」钉在侧边栏底部，历史会话在其上方滚动。
+   用 st.container() + .cp-bottom-anchor 标记底部区；嵌套 stVerticalBlock 选择器
+   （[stVerticalBlock] [stVerticalBlock]）只命中容器自身，不误伤根容器导致整栏不滚动。 */
+[data-testid="stSidebar"] [data-testid="stVerticalBlock"] [data-testid="stVerticalBlock"]:has(.cp-bottom-anchor) {
+  position: sticky; bottom: 0; z-index: 2;
+  background: var(--sidebar-bg);
+  margin-top: .4rem; padding-top: .4rem;
+  border-top: 1px solid var(--border);
+}
+/* 底部区内部展开器不要额外外边距，紧凑些 */
+[data-testid="stSidebar"] [data-testid="stVerticalBlock"] [data-testid="stVerticalBlock"]:has(.cp-bottom-anchor) details {
+  margin-top: .2rem;
+}
+
 /* ---------- 主标题 / 分隔 ---------- */
 .stApp h1 { font-weight: 650; letter-spacing: .3px; }
 .stApp h3 { font-weight: 600; }
@@ -212,17 +226,8 @@ hr { border-color: var(--border) !important; opacity: .8; }
 @keyframes cp-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(229,72,77,.45); } 50% { box-shadow: 0 0 0 5px rgba(229,72,77,0); } }
 
 /* ============ 助手消息操作栏 ============ */
-.cp-actions { display: inline-flex; align-items: center; gap: .35rem; }
-.cp-act {
-  font-size: .78rem; color: var(--text-muted); background: transparent; border: none;
-  padding: .25rem .55rem; border-radius: 8px; cursor: pointer; display: inline-flex;
-  align-items: center; gap: .3rem; transition: all .15s ease;
-}
-.cp-act:hover { background: var(--accent-soft); color: var(--accent); }
-.cp-act.cp-copied { color: #2f9e44; }
-/* hover 才显示整条操作栏（:has 作用域；不支持 :has 时退化为常显） */
-[data-testid="stChatMessage"] [data-testid="stHorizontalBlock"]:has(.cp-actions) { opacity: .5; transition: opacity .18s ease; }
-[data-testid="stChatMessage"]:hover [data-testid="stHorizontalBlock"]:has(.cp-actions) { opacity: 1; }
+/* 复制全文改用 st.code 原生复制按钮（macOS 可靠），见 app.py 的 st.expander；
+   旧的 .cp-act/.cp-actions 自定义 HTML 复制按钮已移除。 */
 .cp-meta { font-size: .74rem; color: var(--text-muted); text-align: right; opacity: .85; }
 
 /* ============ token 用量胶囊 ============ */

@@ -196,16 +196,3 @@ def user_bubble_html(content: str, avatar_path: str,
         f'<div class="cp-avatar">{avatar}</div>'
         '</div>'
     )
-
-
-def copy_chip_html(content: str) -> str:
-    """助手消息的「复制全文」按钮：内容以 base64 存入 data-b64，
-    由全局事件委托（components.html 注入的脚本）拦截 .cp-act 点击并解码写入剪贴板。
-    不用内联 onclick——st.markdown 的 DOMPurify 会清掉 on* 事件属性。"""
-    b64 = base64.b64encode((content or "").encode("utf-8")).decode("ascii")
-    return (
-        '<div class="cp-actions">'
-        f'<button class="cp-act" type="button" data-b64="{b64}" title="复制全文">📋 复制</button>'
-        '</div>'
-    )
-

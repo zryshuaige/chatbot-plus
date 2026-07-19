@@ -11,7 +11,7 @@ import streamlit.components.v1 as components
 
 import api_client as api
 from themes import theme_css, theme_keys, theme_name, DEFAULT_THEME
-from render import render_content, user_bubble_html, copy_chip_html, attachments_html, _normalize_attachments as _coerce_atts
+from render import render_content, user_bubble_html, attachments_html, _normalize_attachments as _coerce_atts
 
 st.set_page_config(page_title="chatbot-plus", page_icon="🤖", layout="wide",
                    initial_sidebar_state="expanded")
@@ -22,7 +22,8 @@ st.set_page_config(page_title="chatbot-plus", page_icon="🤖", layout="wide",
 # 说明：st.html 会用 DOMPurify 清掉 <script>，JS 根本不执行；st.markdown 会清掉 on* 事件。
 # 唯一能在主文档跑 JS 的途径是 components.html（iframe 带 allow-scripts + allow-same-origin）。
 # 附件按钮已改用 st.chat_input(accept_file=...) 原生实现（自动位于输入框最左侧），无需 JS 定位。
-# 这里只做三件 CSS 搞不定的事：复制全文（事件委托）、流式光标/停止胶囊、灵感卡片打卡片样式。
+# 这里只做两件 CSS 搞不定的事：流式光标/停止胶囊、灵感卡片打卡片样式。
+# （复制全文已改用 st.code 原生复制按钮，见助手消息操作栏，无需 JS 注入。）
 _SUGG_ICONS = ["💡", "✍️", "🧠", "🚀"]
 
 
@@ -44,44 +45,10 @@ def _cp_components_js(sugg: list) -> str:
     }}
   }} catch (e) {{}}
 
-  // ---- 复制助手全文（事件委托，按钮每次 rerun 重建，委托一次即可）----
-  // 同步优先：在 click 事件里同步创建隐藏 textarea + execCommand('copy')，保留用户手势，
-  // 且不受 iframe 剪贴板权限策略限制。macOS Safari 下异步 navigator.clipboard 会被拒、
-  // 且兜底若放进 Promise 回调执行时手势已失效，故必须同步优先。execCommand 失败再回退异步 API。
-  function cpSyncCopy(text){{
-    var ta = d.createElement('textarea');
-    ta.setAttribute('readonly', '');
-    ta.value = text;
-    ta.style.position = 'fixed'; ta.style.top = '0'; ta.style.left = '0';
-    ta.style.width = '2em'; ta.style.height = '2em';
-    ta.style.padding = '0'; ta.style.border = 'none'; ta.style.outline = 'none';
-    ta.style.boxShadow = 'none'; ta.style.background = 'transparent';
-    d.body.appendChild(ta);
-    ta.focus(); ta.select(); ta.setSelectionRange(0, text.length);
-    var ok = false;
-    try {{ ok = d.execCommand('copy'); }} catch (e) {{ ok = false; }}
-    d.body.removeChild(ta);
-    return ok;
-  }}
-  w.cpCopy = function(el){{
-    var bin = atob(el.dataset.b64);
-    var bytes = new Uint8Array(bin.length);
-    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    var text = new TextDecoder('utf-8').decode(bytes);
-    var old = el.getAttribute('data-label') || el.innerHTML;
-    el.setAttribute('data-label', old);
-    var feedback = function(ok){{
-      el.classList.add('cp-copied');
-      el.innerHTML = ok ? '✓ 已复制' : '⚠ 复制失败';
-      setTimeout(function () {{ el.classList.remove('cp-copied'); el.innerHTML = old; }}, 1400);
-    }};
-    var ok = cpSyncCopy(text);
-    if (ok) {{ feedback(true); return; }}
-    if (w.navigator.clipboard && w.navigator.clipboard.writeText) {{
-      w.navigator.clipboard.writeText(text).then(function () {{ feedback(true); }},
-                                                function () {{ feedback(false); }});
-    }} else {{ feedback(false); }}
-  }};
+  // 复制助手全文已改用 st.code 的原生复制按钮（见 app.py 助手操作栏的 st.expander）。
+  // 原因：本 iframe 注入的脚本在 iframe realm 运行，Safari/WebKit 会阻断其对父文档的
+  // 剪贴板调用（navigator.clipboard 受 allow=clipboard-write 限制，execCommand 跨 realm 也不可靠）。
+  // st.code 的复制按钮在主文档 realm 运行，是 macOS 上唯一稳定可用的途径。
 
   // ---- 流式模式：从 DOM 推断（有 .cp-thinking=思考中；有「停止」按钮=流式中）----
   function applyStreamMode(){{
@@ -114,13 +81,9 @@ def _cp_components_js(sugg: list) -> str:
     tagSuggestions(w.__cpSugg || [], w.__cpSuggIcons || []);
   }};
 
-  // ---- 一次性挂载：事件委托 + MutationObserver + 兜底轮询 ----
+  // ---- 一次性挂载：MutationObserver + 兜底轮询 ----
   if (!w.__cpReady) {{
     w.__cpReady = true;
-    d.addEventListener('click', function (e){{
-      var el = e.target.closest && e.target.closest('.cp-act[data-b64]');
-      if (el) {{ e.preventDefault(); w.cpCopy(el); }}
-    }});
     var raf = 0;
     var schedule = function () {{
       if (raf) return;
@@ -210,8 +173,12 @@ def send_suggestion(text: str):
 
 
 def _current_task_obj():
-    """当前任务对象（优先 current_task，新建时回退 new_task）。"""
-    key = st.session_state.current_task or st.session_state.new_task
+    """当前任务对象：有会话用 current_task；未建会话（current_cid 为空）用 new_task，
+    这样在侧边栏选了图片任务但还没发送时，空会话页就能正确显示提示词模版、隐藏通用欢迎语。"""
+    if st.session_state.current_cid:
+        key = st.session_state.current_task
+    else:
+        key = st.session_state.new_task or st.session_state.current_task
     return next((t for t in st.session_state.tasks if t["key"] == key), None)
 
 
@@ -563,11 +530,9 @@ def _apply_preset(temp: float, top_p: float, max_tok: int):
     st.session_state.set_max_tokens = max_tok
 
 
-def render_settings():
-    """偏好设置：昵称、头像、主题、采样参数、压缩策略。
-    采样/压缩参数均带 hover 大白话解释（help），并提供「创意/平衡/精确」预设。"""
-    with st.expander("⚙️ 个性化设置"):
-        st.markdown("#### 👤 个人资料")
+def render_personal():
+    """个人信息：昵称、头像、主题（侧边栏底部固定区之一）。"""
+    with st.expander("👤 个人信息"):
         st.text_input("昵称", value=prefs.get("nickname", "我"), key="set_nickname")
 
         cur_avatar = prefs.get("avatar_path", "")
@@ -589,14 +554,26 @@ def render_settings():
         if st.session_state.get("_avatar_msg"):
             st.caption(st.session_state["_avatar_msg"])
 
-        st.markdown("#### 🎨 外观")
         st.selectbox("UI 风格", theme_keys(),
                      format_func=theme_name,
                      index=theme_keys().index(prefs.get("theme") or DEFAULT_THEME),
                      key="set_theme",
                      help="切换界面配色，立即生效；保存后会被记住。")
 
-        st.markdown("#### 🎛 采样参数")
+        if st.button("💾 保存个人信息", use_container_width=True):
+            api.update_prefs({
+                "nickname": st.session_state.set_nickname,
+                "theme": st.session_state.set_theme,
+            })
+            st.session_state.prefs = api.get_prefs()
+            st.success("已保存")
+            st.rerun()
+
+
+def render_params():
+    """参数设置：采样参数 + 上下文压缩（侧边栏底部固定区之二）。
+    采样/压缩参数均带 hover 大白话解释（help），并提供「创意/平衡/精确」预设。"""
+    with st.expander("🎛 参数设置"):
         st.caption("💡 不懂这些术语？把鼠标移到参数名旁的 ❓ 上看大白话说明，或直接选一个预设。")
         pc = st.columns(3)
         pc[0].button("🎨 创意", key="preset_creative", use_container_width=True,
@@ -631,7 +608,7 @@ def render_settings():
                   help="回复最多生成多少 token（1 个汉字 ≈ 1.5 token）。设太小会被截断，"
                        "设太大更费额度、更慢。")
 
-        st.markdown("#### 🧠 上下文压缩")
+        st.markdown("##### 🧠 上下文压缩")
         st.slider("保留最近 N 轮原文", 1, 12,
                   int(prefs.get("history_keep", 4)), 1, key="set_history_keep",
                   help="上下文超长时把更早的对话压成摘要，但始终保留最近这几轮完整原文，"
@@ -641,10 +618,8 @@ def render_settings():
                   help="当本轮对话估算 token 超过该值时触发压缩。越大越晚压缩（更完整但更费额度），"
                        "越小越早压缩。")
 
-        if st.button("💾 保存设置", use_container_width=True):
+        if st.button("💾 保存参数", use_container_width=True):
             api.update_prefs({
-                "nickname": st.session_state.set_nickname,
-                "theme": st.session_state.set_theme,
                 "temperature": st.session_state.set_temperature,
                 "top_p": st.session_state.set_top_p,
                 "max_tokens": st.session_state.set_max_tokens,
@@ -728,8 +703,11 @@ with st.sidebar:
             unsafe_allow_html=True,
         )
 
-    st.divider()
-    render_settings()
+    # 底部固定区：个人信息 + 参数设置（CSS 据锚点 .cp-bottom-anchor 钉在侧边栏底部）
+    with st.container():
+        st.markdown('<div class="cp-bottom-anchor"></div>', unsafe_allow_html=True)
+        render_personal()
+        render_params()
 
 
 # ================ 主区域 ================
@@ -768,27 +746,29 @@ if st.session_state.current_cid:
                            file_name=f"{st.session_state.current_title}.json",
                            mime="application/json", use_container_width=True)
 else:
-    _nick = html.escape(prefs.get("nickname") or "我")
-    st.markdown(
-        f"<div class='cp-hero'>"
-        f"<div class='cp-hero-logo'>🤖</div>"
-        f"<h2>你好，{_nick} 👋</h2>"
-        f"<p>有什么可以帮你的？在下方输入消息，或挑一个灵感话题直接开始。</p>"
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-    # 空会话：展示几个随机灵感问题，点击即发送
-    if (not st.session_state.streaming
-            and not st.session_state.editing_msg_id
-            and not st.session_state.messages):
-        sugg = st.session_state.suggestions or pick_suggestions()
-        st.session_state.suggestions = sugg
-        cols = st.columns(2)
-        for i, s in enumerate(sugg):
-            if cols[i % 2].button(s, key=f"sg_{i}", use_container_width=True,
-                                   type="secondary"):
-                send_suggestion(s)
-        # 灵感卡片样式由注入脚本据 sugg 列表自动打类（见底部 components.html）
+    # 图片任务不显示通用欢迎语与灵感话题（改由下方提示词模版引导）
+    if not _is_image_task():
+        _nick = html.escape(prefs.get("nickname") or "我")
+        st.markdown(
+            f"<div class='cp-hero'>"
+            f"<div class='cp-hero-logo'>🤖</div>"
+            f"<h2>你好，{_nick} 👋</h2>"
+            f"<p>有什么可以帮你的？在下方输入消息，或挑一个灵感话题直接开始。</p>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        # 空会话：展示几个随机灵感问题，点击即发送
+        if (not st.session_state.streaming
+                and not st.session_state.editing_msg_id
+                and not st.session_state.messages):
+            sugg = st.session_state.suggestions or pick_suggestions()
+            st.session_state.suggestions = sugg
+            cols = st.columns(2)
+            for i, s in enumerate(sugg):
+                if cols[i % 2].button(s, key=f"sg_{i}", use_container_width=True,
+                                       type="secondary"):
+                    send_suggestion(s)
+            # 灵感卡片样式由注入脚本据 sugg 列表自动打类（见底部 components.html）
 
 # 图片生成/编辑任务：空会话时展示提示词模版卡片，点击即发送
 if (not st.session_state.streaming
@@ -856,11 +836,14 @@ for m in st.session_state.messages:
                     unsafe_allow_html=True,
                 )
             if not st.session_state.streaming:
-                # 操作栏：复制全文 + 重新生成（hover 才完整显现）
-                ac = st.columns([1, 1, 6])
-                ac[0].markdown(copy_chip_html(m["content"]), unsafe_allow_html=True)
-                if ac[1].button("🔄", key=f"rg_{m['id']}", help="重新生成回复"):
+                # 操作栏：重新生成（小图标）
+                _act = st.columns([1, 7])
+                if _act[0].button("🔄", key=f"rg_{m['id']}", help="重新生成回复"):
                     handle_regen(m["id"])
+                # 复制全文：展开后用 st.code 的原生复制按钮（主文档 realm，macOS 可靠）。
+                # 旧的 iframe 注入式复制在 Safari 跨 realm 被阻断，已弃用。
+                with st.expander("📋 复制全文", expanded=False):
+                    st.code(m["content"], language="markdown")
 
 # 编辑框
 if st.session_state.editing_msg_id and not st.session_state.streaming:
