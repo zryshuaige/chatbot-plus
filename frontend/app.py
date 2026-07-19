@@ -51,16 +51,26 @@ def _cp_components_js(sugg: list) -> str:
   // st.code 的复制按钮在主文档 realm 运行，是 macOS 上唯一稳定可用的途径。
 
   // ---- 流式模式：从 DOM 推断（有 .cp-thinking=思考中；有「停止」按钮=流式中）----
+  // 幂等：只在目标状态与当前不同时增删类，避免每 0.3s 同步重放入场动画（cp-pop）。
   function applyStreamMode(){{
     var msgs = d.querySelectorAll('[data-testid="stChatMessage"]');
-    for (var i = 0; i < msgs.length; i++) {{ msgs[i].classList.remove('cp-streaming', 'cp-thinking-bubble'); }}
     var last = msgs[msgs.length - 1];
+    // 历史气泡不该带流式标记
+    for (var i = 0; i < msgs.length - 1; i++) {{ msgs[i].classList.remove('cp-streaming', 'cp-thinking-bubble'); }}
     if (!last) return;
     var btns = last.querySelectorAll('button');
     var stopBtn = null;
     for (var j = 0; j < btns.length; j++) {{ if (btns[j].textContent.trim().indexOf('停止') !== -1) {{ stopBtn = btns[j]; break; }} }}
-    if (last.querySelector('.cp-thinking')) {{ last.classList.add('cp-thinking-bubble'); }}
-    else if (stopBtn) {{ last.classList.add('cp-streaming'); stopBtn.classList.add('cp-stop-btn'); }}
+    var wantThinking = !!last.querySelector('.cp-thinking');
+    var wantStreaming = !wantThinking && !!stopBtn;
+    if (wantThinking) {{
+      last.classList.add('cp-thinking-bubble'); last.classList.remove('cp-streaming');
+    }} else if (wantStreaming) {{
+      last.classList.add('cp-streaming'); last.classList.remove('cp-thinking-bubble');
+      if (stopBtn) stopBtn.classList.add('cp-stop-btn');
+    }} else {{
+      last.classList.remove('cp-streaming', 'cp-thinking-bubble');
+    }}
   }}
 
   // ---- 灵感卡片：按文本匹配给按钮加卡片样式 + 图标 ----
@@ -725,31 +735,35 @@ if st.session_state.get("_last_error"):
     del st.session_state["_last_error"]
     
 if st.session_state.current_cid:
-    header = st.columns([7, 2, 1])
-    # 切换会话时重置标题输入框
-    if st.session_state.get("_title_cid") != st.session_state.current_cid:
-        st.session_state["_title_cid"] = st.session_state.current_cid
-        st.session_state["title_input"] = st.session_state.current_title
+    # 顶栏包进 container + 锚点：CSS 据 .cp-topbar-anchor 把本容器钉为主区顶部
+    # 半透明材质粘性条（wayfinding：始终显示当前会话标题/任务/导出）。
+    with st.container():
+        st.markdown('<div class="cp-topbar-anchor"></div>', unsafe_allow_html=True)
+        header = st.columns([7, 2, 1])
+        # 切换会话时重置标题输入框
+        if st.session_state.get("_title_cid") != st.session_state.current_cid:
+            st.session_state["_title_cid"] = st.session_state.current_cid
+            st.session_state["title_input"] = st.session_state.current_title
 
-    def on_title_change():
-        new_t = st.session_state.title_input.strip() or "新对话"
-        api.update_conversation(st.session_state.current_cid, title=new_t)
-        st.session_state.current_title = new_t
+        def on_title_change():
+            new_t = st.session_state.title_input.strip() or "新对话"
+            api.update_conversation(st.session_state.current_cid, title=new_t)
+            st.session_state.current_title = new_t
 
-    header[0].text_input("标题", label_visibility="collapsed",
-                         key="title_input", on_change=on_title_change)
-    header[1].markdown(f"`{task_name(st.session_state.current_task)}`")
+        header[0].text_input("标题", label_visibility="collapsed",
+                             key="title_input", on_change=on_title_change)
+        header[1].markdown(f"`{task_name(st.session_state.current_task)}`")
 
-    with header[2].popover("⬇️", use_container_width=True, help="导出当前会话"):
-        st.caption("导出当前会话")
-        md = api.export_conversation(st.session_state.current_cid, "md")
-        js = api.export_conversation(st.session_state.current_cid, "json")
-        st.download_button("Markdown", data=md["content"],
-                           file_name=md["filename"], mime="text/markdown",
-                           use_container_width=True)
-        st.download_button("JSON", data=js["content"],
-                           file_name=f"{st.session_state.current_title}.json",
-                           mime="application/json", use_container_width=True)
+        with header[2].popover("⬇️", use_container_width=True, help="导出当前会话"):
+            st.caption("导出当前会话")
+            md = api.export_conversation(st.session_state.current_cid, "md")
+            js = api.export_conversation(st.session_state.current_cid, "json")
+            st.download_button("Markdown", data=md["content"],
+                               file_name=md["filename"], mime="text/markdown",
+                               use_container_width=True)
+            st.download_button("JSON", data=js["content"],
+                               file_name=f"{st.session_state.current_title}.json",
+                               mime="application/json", use_container_width=True)
 else:
     # 图片任务不显示通用欢迎语与灵感话题（改由下方提示词模版引导）
     if not _is_image_task():
@@ -853,6 +867,8 @@ for m in st.session_state.messages:
 # 编辑框
 if st.session_state.editing_msg_id and not st.session_state.streaming:
     with st.container(border=True):
+        # 锚点：CSS 据 .cp-edit-anchor 给本容器加入场过渡（teleporting state -> 动画桥接）
+        st.markdown('<div class="cp-edit-anchor"></div>', unsafe_allow_html=True)
         st.caption("✏️ 编辑消息后重发（会截断其后所有内容）")
         st.text_area("编辑内容", key="edit_text", height=100)
         ec = st.columns([1, 1, 4])
