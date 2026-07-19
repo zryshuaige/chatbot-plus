@@ -8,6 +8,8 @@ __pycache__/
 .vscode/
 .DS_Store
 *.docx
+.agents/
+skills-lock.json
 
 # 一键启动脚本的运行日志
 logs/*.log

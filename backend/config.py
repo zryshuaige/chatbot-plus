@@ -29,6 +29,16 @@ class Settings:
     image_edit_model: str = os.getenv("IMAGE_EDIT_MODEL", "Qwen/Qwen-Image-Edit-2509")
     image_size: str = os.getenv("IMAGE_SIZE", "1024x1024")
 
+    # 支持 Function Calling 的模型白名单：仅这些模型在对话中注入“生成文档”工具。
+    # 白名单外模型正常对话，不报错、无文档能力。可在 .env 的 FC_MODELS 自行增删。
+    fc_models: list[str] = _split_csv(os.getenv(
+        "FC_MODELS",
+        "deepseek-ai/DeepSeek-V4-Pro,deepseek-ai/DeepSeek-V4-Flash,"
+        "moonshotai/Kimi-K2.7-Code,Pro/moonshotai/Kimi-K2.6,"
+        "MiniMaxAI/MiniMax-M2.5,Qwen/Qwen2.5-72B-Instruct,"
+        "Qwen/Qwen2.5-7B-Instruct",
+    ))
+
     # 服务端口
     backend_port: int = int(os.getenv("BACKEND_PORT", "8002"))
     frontend_port: int = int(os.getenv("FRONTEND_PORT", "8502"))

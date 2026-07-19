@@ -2,7 +2,7 @@
 token 估算，以及“自动命名 / 上下文压缩”这类轻量调用。'''
 import base64
 import re
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 import requests
 from openai import AsyncOpenAI
@@ -130,17 +130,24 @@ async def stream_chat(
     temperature: float = 0.5,
     top_p: float = 0.5,
     max_tokens: int = 1024,
+    tools: Optional[list[dict]] = None,
 ) -> AsyncIterator:
-    """流式发起对话。开启 include_usage 以便末尾拿到 token 用量。"""
-    response = await client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        top_p=top_p,
-        max_tokens=max_tokens,
-        stream=True,
-        stream_options={"include_usage": True},
-    )
+    """流式发起对话。开启 include_usage 以便末尾拿到 token 用量。
+    tools 非空时透传给 API（Function Calling）；模型在识别到“生成文档”意图时
+    会返回 tool_calls，由调用方在流式累积后执行。"""
+    kwargs = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "top_p": top_p,
+        "max_tokens": max_tokens,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    if tools:
+        kwargs["tools"] = tools
+        kwargs["tool_choice"] = "auto"
+    response = await client.chat.completions.create(**kwargs)
     return response
 
 

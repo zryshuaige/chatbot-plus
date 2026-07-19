@@ -15,6 +15,7 @@ from starlette.responses import StreamingResponse
 import db
 from config import settings
 from context import build_llm_messages
+from documents import TOOL_GUIDE, dispatch_tool, tools_for_api
 from llm import edit_image, generate_image, generate_title, stream_chat
 
 router = APIRouter()
@@ -92,6 +93,19 @@ def _save_image_bytes(raw: bytes, prefix: str = "gen") -> dict:
         chars=0, text="", path=str(save_path),
     )
     return {"file_id": fid, "filename": save_name, "kind": "image", "chars": 0}
+
+
+def _save_doc_bytes(raw: bytes, prefix: str, ext: str) -> dict:
+    """把文档生成得到的字节落盘并入库，返回附件元数据。
+    kind 标记为 document，前端 _attach_chips 会把它渲染成可点击下载的 chip。"""
+    save_name = f"{prefix}_{uuid.uuid4().hex[:12]}.{ext}"
+    save_path = settings.files_dir / save_name
+    save_path.write_bytes(raw)
+    fid = db.add_file(
+        filename=save_name, kind="document", size=len(raw),
+        chars=0, text="", path=str(save_path),
+    )
+    return {"file_id": fid, "filename": save_name, "kind": "document", "chars": 0}
 
 
 def _last_user_image_bytes(last_user: dict) -> bytes:
@@ -248,14 +262,26 @@ async def chat(req: ChatRequest):
                         break
 
     # step03：流式请求大模型并通过 SSE 推给前端
+    # ===== 文档自动生成：对支持 Function Calling 的模型注入工具 =====
+    # 白名单内模型：追加工具引导 system 消息，并带 tools 调用；模型识别到“生成
+    # 文档”意图时返回 tool_calls，event_stream 里累积执行后作为附件下发。
+    # 白名单外模型：tools=None，正常对话，不报错、无文档能力。
+    use_fc = model in settings.fc_models
+    if use_fc:
+        llm_messages.append({"role": "system", "content": TOOL_GUIDE})
+    tools = tools_for_api() if use_fc else None
+
     async def event_stream():
         full_text = ""
         usage = None
+        # 累积流式 tool_calls：{index: {"id", "name", "arguments"}}
+        # 跨 chunk 增量拼接，流结束后统一执行。
+        tc_buf: dict[int, dict] = {}
         # 先发 start 事件，回传用户消息 id（供前端回填，支持重生成/编辑）
         yield f"data: {json.dumps({'type': 'start', 'user_message_id': user_mid}, ensure_ascii=False)}\n\n"
         try:
             response = await stream_chat(
-                llm_messages, model, temperature, top_p, max_tokens
+                llm_messages, model, temperature, top_p, max_tokens, tools=tools
             )
             async for chunk in response:
                 # 带 include_usage 时，最后一个 chunk 的 choices 可能为空
@@ -268,7 +294,40 @@ async def chat(req: ChatRequest):
                 if piece:
                     full_text += piece
                     yield f"data: {json.dumps({'type': 'token', 'content': piece}, ensure_ascii=False)}\n\n"
-            # step04：把 token 用量随 done 事件回传；助手回复由前端在“完成/停止”时
+                # 累积 tool_calls（OpenAI 流式协议：按 index 分片增量拼接）
+                for tc in (getattr(delta, "tool_calls", None) or []):
+                    idx = tc.index if tc.index is not None else 0
+                    slot = tc_buf.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                    if tc.id:
+                        slot["id"] = tc.id
+                    fn = getattr(tc, "function", None)
+                    if fn:
+                        if fn.name:
+                            slot["name"] += fn.name
+                        if fn.arguments:
+                            slot["arguments"] += fn.arguments
+            # step04：若模型调用了文档工具，执行打包 -> 落盘 -> 发 file 附件事件
+            if tc_buf:
+                for idx in sorted(tc_buf):
+                    slot = tc_buf[idx]
+                    name = slot["name"]
+                    try:
+                        args = json.loads(slot["arguments"] or "{}")
+                    except json.JSONDecodeError as e:
+                        yield f"data: {json.dumps({'type': 'error', 'message': f'文档工具参数解析失败：{e}'}, ensure_ascii=False)}\n\n"
+                        continue
+                    try:
+                        raw, ext, note = await asyncio.to_thread(dispatch_tool, name, args)
+                    except Exception as e:
+                        yield f"data: {json.dumps({'type': 'error', 'message': f'生成文档失败：{e}'}, ensure_ascii=False)}\n\n"
+                        continue
+                    prefix = {"generate_word": "doc", "generate_ppt": "ppt",
+                              "generate_excel": "xls"}.get(name, "doc")
+                    att = _save_doc_bytes(raw, prefix, ext)
+                    # 说明文字作为助手正文，让前端 buffer 收到它
+                    yield f"data: {json.dumps({'type': 'token', 'content': note}, ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps({'type': 'file', 'attachments': [att]}, ensure_ascii=False)}\n\n"
+            # step05：把 token 用量随 done 事件回传；助手回复由前端在“完成/停止”时
             # 调用 POST /conversations/{cid}/messages 落库——这样“停止生成”也能保存部分内容。
             usage_dict = {}
             if usage:

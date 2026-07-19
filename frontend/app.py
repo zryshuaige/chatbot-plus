@@ -479,6 +479,11 @@ def streaming_fragment():
             # 图片生成/编辑：助手消息携带的图片附件，finalize 时随消息落库与展示
             for a in (evt.get("attachments") or []):
                 st.session_state.stream_attachments.append(a)
+        elif t == "file":
+            # 文档自动生成（Function Calling）：助手消息携带的文档附件，
+            # 复用图片附件同一条链路，finalize 时落库并渲染为可下载 chip。
+            for a in (evt.get("attachments") or []):
+                st.session_state.stream_attachments.append(a)
         elif t == "usage":
             st.session_state.stream_usage = evt
         elif t in ("done", "stopped", "error"):
