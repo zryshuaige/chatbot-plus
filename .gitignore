@@ -10,7 +10,7 @@ __pycache__/
 *.docx
 .agents/
 skills-lock.json
-logs/
+logs/agent.jsonl
 
 # 一键启动脚本的运行日志
 logs/*.log
