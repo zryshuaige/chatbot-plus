@@ -1,14 +1,28 @@
-# 与 project-a 保持一致的技术栈，新增 python-multipart（头像上传）与 Pillow（头像处理）
+# === 基础 Web 框架 ===
 fastapi>=0.110
 uvicorn>=0.29
-openai>=1.30
 streamlit>=1.43
-requests>=2.31
-python-dotenv>=1.0
+python-multipart>=0.0.9  # 头像 / 文件上传解析
+
+# === LLM 客户端 + Agent 编排 ===
+openai>=1.30              # 兼容 OpenAI 协议的大模型调用（默认走 SiliconFlow）
+langchain>=1.0            # create_agent() 在 langchain 1.0 才可用
+langchain-core>=1.0
+langchain-openai>=1.0     # ChatOpenAI 模型工厂（硅基流动 / OpenAI 兼容）
+langgraph>=1.2            # create_agent 内部依赖的图运行时
+
+# === 配置 / 校验 / 数据库 ===
 pydantic>=2.6
-python-multipart>=0.0.9
+python-dotenv>=1.0
+requests>=2.31
+
+# === 图片 / 头像处理 ===
 Pillow>=10.0
-# 文档生成：Function Calling 触发后打包 Word/PPT/Excel
+
+# === 文档生成（Function Calling 触发后打包 Word / PPT / Excel）===
 python-docx>=1.1
 python-pptx>=0.6.23
 openpyxl>=3.1
+
+# === 二维码（本地工具：generate_qrcode）===
+qrcode>=7.4

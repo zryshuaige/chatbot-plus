@@ -37,10 +37,19 @@ if [[ -f "${LOG_DIR}/run.pid" ]]; then
 fi
 sleep 1
 
+# ---- 选择 Python：优先使用 .venv（langchain 1.x 需要 Python ≥3.10）----
+PY="${ROOT}/.venv/bin/python"
+STREAMLIT="${ROOT}/.venv/bin/streamlit"
+if [[ ! -x "${PY}" ]]; then
+  echo "⚠️  未发现 ${PY}，回退到系统 python3（langchain 1.x 需要 3.10+）"
+  PY="python3"
+  STREAMLIT="streamlit"
+fi
+
 # ---- 启动后端（在 backend/ 目录运行，日志写 logs/backend.log）----
 echo "🚀 启动后端（uvicorn，端口 ${BACKEND_PORT}）…"
 BACKEND_LOG="${LOG_DIR}/backend.log"
-nohup bash -c "cd '${ROOT}/backend' && exec python3 -m uvicorn main:app \
+nohup bash -c "cd '${ROOT}/backend' && exec '${PY}' -m uvicorn main:app \
     --host 127.0.0.1 --port '${BACKEND_PORT}'" \
     > "${BACKEND_LOG}" 2>&1 &
 BACKEND_PID=$!
@@ -52,7 +61,7 @@ echo "${BACKEND_PID}" > "${LOG_DIR}/backend.pid"
 # 会把前端暴露到局域网，与“run.sh 仅本机、run_lan.sh 局域网”的约定冲突。
 echo "🎨 启动前端（streamlit，端口 ${FRONTEND_PORT}，仅本机）…"
 FRONTEND_LOG="${LOG_DIR}/frontend.log"
-nohup bash -c "cd '${ROOT}/frontend' && exec streamlit run app.py \
+nohup bash -c "cd '${ROOT}/frontend' && exec '${STREAMLIT}' run app.py \
     --server.address 127.0.0.1 --server.port '${FRONTEND_PORT}' \
     --server.headless true --browser.gatherUsageStats false" \
     > "${FRONTEND_LOG}" 2>&1 &

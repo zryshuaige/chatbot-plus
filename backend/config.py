@@ -57,6 +57,11 @@ class Settings:
     max_file_size: int = int(os.getenv("MAX_FILE_SIZE_MB", "8")) * 1024 * 1024
     max_file_chars: int = int(os.getenv("MAX_FILE_CHARS", "20000"))
 
+    # Agent / 工具
+    agent_max_steps: int = int(os.getenv("AGENT_MAX_STEPS", "6"))         # 单轮最多工具调用次数（软上限）
+    agent_recursion_limit: int = int(os.getenv("AGENT_RECURSION_LIMIT", "12"))  # LangGraph 递归硬上限
+    tool_cache_ttl: int = int(os.getenv("TOOL_CACHE_TTL", "600"))          # 实时信息工具结果缓存秒数
+
     def ensure_dirs(self) -> None:
         """启动时确保数据目录存在。"""
         self.data_dir.mkdir(parents=True, exist_ok=True)

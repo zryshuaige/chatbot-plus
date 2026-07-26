@@ -62,6 +62,16 @@ def get_prefs():
     return _get("/prefs")["prefs"]
 
 
+def get_tool_groups():
+    """获取工具分组（输入区上方 chips 用）。返回 [{key,name,icon,hint,tools}, ...]，
+    失败时回退到空 list——chips 区域会直接隐藏，不阻塞主对话流。"""
+    try:
+        data = _get("/tools")
+        return (data or {}).get("groups", []) or []
+    except Exception:
+        return []
+
+
 def update_prefs(payload: dict):
     return _patch("/prefs", payload)["prefs"]
 

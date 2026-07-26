@@ -14,9 +14,11 @@ from starlette.responses import StreamingResponse
 
 import db
 from config import settings
-from context import build_llm_messages
+from context import build_llm_messages, build_lc_messages
 from documents import TOOL_GUIDE, dispatch_tool, tools_for_api
 from llm import edit_image, generate_image, generate_title, stream_chat
+from agent import agent_stream
+from tools import TOOL_GROUPS, get_tool as _get_tool
 
 router = APIRouter()
 
@@ -261,15 +263,38 @@ async def chat(req: ChatRequest):
                         m["content"] = [{"type": "text", "text": txt}, *img_parts]
                         break
 
-    # step03：流式请求大模型并通过 SSE 推给前端
-    # ===== 文档自动生成：对支持 Function Calling 的模型注入工具 =====
-    # 白名单内模型：追加工具引导 system 消息，并带 tools 调用；模型识别到“生成
-    # 文档”意图时返回 tool_calls，event_stream 里累积执行后作为附件下发。
-    # 白名单外模型：tools=None，正常对话，不报错、无文档能力。
-    use_fc = model in settings.fc_models
-    if use_fc:
-        llm_messages.append({"role": "system", "content": TOOL_GUIDE})
-    tools = tools_for_api() if use_fc else None
+    # ===== 路径选择 =====
+    # 1) FC 模型（agent 路径）：使用 langchain create_agent，支持 13 个工具 + 防循环；
+    #    兼容旧的 image / file 事件，让前端附件渲染代码零改动。
+    # 2) 非 FC 模型（兼容路径）：保留原 stream_chat 文本流，无工具能力。
+    use_agent = model in settings.fc_models
+
+    if use_agent:
+        # 用 langchain 消息格式重新组装上下文（共用了压缩逻辑）
+        lc_messages, compressed = await build_lc_messages(
+            conv, messages, threshold, keep_turns,
+        )
+        # 多模态：把最后一条用户消息携带的图片以 image_url 片段传入
+        # （与原 stream_chat 路径完全一致）
+        img_parts = []
+        if last_user:
+            img_fids = [a["file_id"] for a in (last_user.get("attachments") or [])
+                        if a.get("kind") == "image" and a.get("file_id")]
+            if img_fids:
+                img_parts = _image_url_parts(img_fids)
+
+        async def agent_event_stream():
+            yield f"data: {json.dumps({'type': 'start', 'user_message_id': user_mid}, ensure_ascii=False)}\n\n"
+            try:
+                async for ev in agent_stream(
+                    conv, lc_messages, model, temperature, top_p, max_tokens,
+                    multimodal_parts=img_parts or None,
+                ):
+                    yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+            except Exception as e:
+                yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(agent_event_stream(), media_type="text/event-stream")
 
     async def event_stream():
         full_text = ""
@@ -281,7 +306,7 @@ async def chat(req: ChatRequest):
         yield f"data: {json.dumps({'type': 'start', 'user_message_id': user_mid}, ensure_ascii=False)}\n\n"
         try:
             response = await stream_chat(
-                llm_messages, model, temperature, top_p, max_tokens, tools=tools
+                llm_messages, model, temperature, top_p, max_tokens, tools=tools_for_api()
             )
             async for chunk in response:
                 # 带 include_usage 时，最后一个 chunk 的 choices 可能为空
@@ -357,3 +382,40 @@ async def make_title(req: TitleRequest):
         return {"code": 200, "title": title}
     except Exception as e:
         return {"code": 500, "message": str(e), "title": "新对话"}
+
+
+@router.get("/tools")
+async def list_tools():
+    """暴露工具分组 + 每个 tool 的简短描述，给前端输入区上方的 chips 面板用。
+    返回 [{key,name,icon,hint,tools:[{name,description}]}]，前端按组渲染 chip；
+    点击 chip → 在 chat input 中 prefill 提示词前缀（如「计算：」「生成 PPT：」）。
+    """
+    out = []
+    for g in TOOL_GROUPS:
+        tools = []
+        for n in g.get("tools", []):
+            t = _get_tool(n)
+            if t is None:
+                continue
+            tools.append({
+                "name": t.name,
+                "description": (t.description or "").strip().replace("\n", " ")[:120],
+            })
+        out.append({
+            "key": g.get("key", ""),
+            "name": g.get("name", ""),
+            "icon": g.get("icon", "🧩"),
+            "hint": _TOOL_HINT.get(g.get("key", ""), ""),
+            "tools": tools,
+        })
+    return {"code": 200, "groups": out}
+
+
+# 每个工具组的「示例前缀」，前端 chip 点击后 prefill 到 chat input。
+_TOOL_HINT = {
+    "info":   "查一下：",
+    "local":  "计算：",
+    "image":  "画：",
+    "doc":    "生成 PPT：",
+    "github": "搜索 GitHub：",
+}

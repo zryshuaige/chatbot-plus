@@ -86,9 +86,31 @@ def _cp_components_js(sugg: list) -> str:
     }});
   }}
 
+  // ---- 工具 chips 钉在输入框正上方（豆包风格）----
+  // chips 原本渲染在主滚动流末尾，会随消息滚走。这里用 position:fixed 把它钉到
+  // stBottom（输入坞）顶边正上方：读 stBottom 的 rect 算 left/width/bottom。
+  // 幂等：每次 __cpSync 都重算并覆盖 inline 样式（rerun 后新节点无样式，自然被重新钉好）。
+  function dockChips(){{
+    var chips = d.querySelector('.st-key-cp_tool_chips');
+    if (!chips) return;                       // 图片任务不渲染 chips
+    var dock = d.querySelector('[data-testid="stBottom"]')
+            || d.querySelector('[data-testid="stChatInput"]');
+    if (!dock) return;
+    var r = dock.getBoundingClientRect();
+    if (r.width < 10) return;                 // 布局未稳定，跳过本轮等下次
+    chips.classList.add('cp-chips-docked');
+    chips.style.position = 'fixed';
+    chips.style.left = r.left + 'px';
+    chips.style.width = r.width + 'px';
+    chips.style.right = 'auto';
+    chips.style.bottom = (w.innerHeight - r.top) + 'px';   // 紧贴输入坞顶边
+    chips.style.zIndex = '300';
+  }}
+
   w.__cpSync = function(){{
     applyStreamMode();
     tagSuggestions(w.__cpSugg || [], w.__cpSuggIcons || []);
+    dockChips();
   }};
 
   // ---- 一次性挂载：MutationObserver + 兜底轮询 ----
@@ -135,6 +157,7 @@ def init_state():
         "stream_error": None,
         "stream_model": "",
         "stream_attachments": [],   # 图片任务：助手消息携带的图片附件（由 image 事件下发）
+        "stream_tool_steps": [],   # agent 工具调用步骤：[{name, args, status, message?}]，气泡上方展示
         "last_usage": None,        # 最近一次 token 用量（展示）
         "editing_msg_id": None,    # 正在编辑的用户消息 id
         "prefs_loaded": False,
@@ -205,6 +228,58 @@ def _model_id_for_task(task_key: str, text_model: str = "") -> str:
     if task_key == "image_edit":
         return st.session_state.image_models.get("edit") or text_model
     return text_model
+
+
+# ==================== 工具步骤展示 ====================
+def _format_tool_args(args: dict) -> str:
+    """把工具入参 dict 渲染成简短的可读字符串。"""
+    if not args:
+        return ""
+    parts = []
+    for k, v in list(args.items())[:3]:
+        v_str = str(v)
+        if len(v_str) > 60:
+            v_str = v_str[:60] + "…"
+        parts.append(f"{k}={v_str}")
+    return ", ".join(parts)
+
+
+def render_tool_steps(steps: list) -> None:
+    """把 agent 的工具调用步骤渲染成一段 HTML，挂在助手气泡上方。
+    设计要点：步骤透明 + 折叠（不挤占主回复空间）+ 守卫提示用醒目颜色。
+    """
+    if not steps:
+        return
+    import html as _html
+    rows = []
+    for s in steps:
+        name = _html.escape(str(s.get("name") or ""))
+        args = _html.escape(_format_tool_args(s.get("args") or {}))
+        status = str(s.get("status") or "start")
+        msg = _html.escape(str(s.get("message") or ""))
+        if status == "start":
+            icon, cls = "🔧", "cp-step"
+            label = args or "运行中…"
+        elif status == "limit":
+            icon, cls = "⛔", "cp-step cp-step-warn"
+            label = msg or "循环守卫触发"
+        elif status == "repeat":
+            icon, cls = "🔁", "cp-step cp-step-warn"
+            label = msg or "重复调用触发"
+        else:
+            icon, cls = "•", "cp-step"
+            label = args or status
+        rows.append(f'<li class="{cls}"><span class="cp-step-icon">{icon}</span>'
+                    f'<code class="cp-step-name">{name}</code>'
+                    f'<span class="cp-step-args">{label}</span></li>')
+    html = (
+        '<details class="cp-tool-steps" open>'
+        '<summary><b>思考步骤</b>'
+        f'<span class="cp-step-count">{len(steps)}</span></summary>'
+        f'<ul class="cp-step-list">{"".join(rows)}</ul>'
+        '</details>'
+    )
+    st.markdown(html, unsafe_allow_html=True)
 
 
 def _render_model_info(model_id, meta_map=None):
@@ -342,6 +417,7 @@ def _rel_time(ts: str) -> str:
 
 
 def maybe_auto_name():
+    """首轮问答结束后让 AI 整理标题（自动路径）。失败不再静默——打 console + toast。"""
     cid = st.session_state.current_cid
     if not cid:
         return
@@ -355,11 +431,76 @@ def maybe_auto_name():
     if not user_msg or not asst_msg:
         return
     try:
-        title = api.generate_title(user_msg["content"], asst_msg["content"])
+        title = (api.generate_title(user_msg["content"], asst_msg["content"]) or "").strip()
+        if not title or title == "新对话":
+            # LLM 返空或占位符——不写入也不报错，但留痕方便排查
+            print(f"[auto-name] empty/placeholder title returned for cid={cid}")
+            return
+        title = title[:60]
         api.update_conversation(cid, title=title)
         st.session_state.current_title = title
+        st.session_state["title_input"] = title      # 同步顶栏标题输入框
+    except Exception as e:
+        print(f"[auto-name] failed for cid={cid}: {e}")
+        st.toast("⚠️ 自动整理标题失败，可在会话菜单点『💡 AI 整理标题』重试", icon="⚠️")
+
+
+def ai_retitle(cid: str):
+    """手动触发 AI 重新整理标题；对任意会话（含非当前会话）有效。
+    当前会话用内存 messages；非当前会话走 api.get_conversation() 拉一次。"""
+    if cid == st.session_state.current_cid:
+        msgs = st.session_state.messages
+    else:
+        try:
+            _conv, msgs = api.get_conversation(cid)
+        except Exception as e:
+            print(f"[ai-retitle] load failed cid={cid}: {e}")
+            st.toast("⚠️ 加载会话消息失败", icon="⚠️")
+            return
+    user_msg = next((m for m in msgs if m["role"] == "user"), None)
+    asst_msg = next((m for m in msgs if m["role"] == "assistant"), None)
+    if not user_msg or not asst_msg:
+        st.toast("需要至少一轮对话才能整理标题", icon="ℹ️")
+        return
+    try:
+        title = (api.generate_title(user_msg["content"], asst_msg["content"]) or "").strip()
+        if not title:
+            st.toast("⚠️ 未能生成标题，请稍后重试", icon="⚠️")
+            return
+        title = title[:60]
+        apply_rename(cid, title, show_toast=False)
+        st.toast(f"✅ 已整理标题：{title}", icon="✅")
+    except Exception as e:
+        print(f"[ai-retitle] generate failed cid={cid}: {e}")
+        st.toast("⚠️ AI 整理标题失败", icon="⚠️")
+
+
+def apply_rename(cid: str, new_title: str, *, show_toast: bool = False) -> bool:
+    """把 new_title 清洗后写入 DB，并同步顶栏标题输入框（若是当前活动会话）。
+    被 rename_dialog / inline ✎ / ai_retitle 三处共用，避免逻辑漂移。
+    返回 True 表示真的改了（写库成功），False 表示清洗后等价于旧值。
+    """
+    clean = (new_title or "").strip()[:60]
+    # 空字符串 / 与旧值等价时不写库；保留原标题
+    if not clean:
+        return False
+    try:
+        old = api.get_conversation(cid)[0].get("title", "")
     except Exception:
-        pass
+        old = ""
+    if clean == (old or "").strip()[:60]:
+        # 即便无变化，也同步一下内存（避免顶栏显示落后于真实状态）
+        if st.session_state.current_cid == cid:
+            st.session_state.current_title = old or clean
+            st.session_state["title_input"] = old or clean
+        return False
+    api.update_conversation(cid, title=clean)
+    if st.session_state.current_cid == cid:
+        st.session_state.current_title = clean
+        st.session_state["title_input"] = clean
+    if show_toast:
+        st.toast(f"✅ 已重命名为：{clean}", icon="✅")
+    return True
 
 
 def start_streaming(query: str, regenerate: bool = False, file_metas: list = None):
@@ -392,6 +533,7 @@ def start_streaming(query: str, regenerate: bool = False, file_metas: list = Non
     st.session_state.stream_usage = None
     st.session_state.stream_error = None
     st.session_state.stream_attachments = []
+    st.session_state.stream_tool_steps = []
     # 图片任务用专用画图模型名落库/展示，否则用会话文本模型
     st.session_state.stream_model = _model_id_for_task(
         st.session_state.current_task, st.session_state.current_model)
@@ -407,13 +549,15 @@ def finalize_streaming():
     tokens = usage.get("total_tokens", 0)
     model = st.session_state.stream_model
     atts = st.session_state.stream_attachments or []
+    steps = list(st.session_state.stream_tool_steps or [])
     if buf.strip() or atts:
         saved = api.save_message(cid, "assistant", buf, tokens=tokens, model=model,
                                  attachments=atts or None)
         st.session_state.messages.append(
             {"id": saved["id"], "role": "assistant", "content": buf,
              "tokens": tokens, "model": model,
-             "attachments": _coerce_atts(atts)}
+             "attachments": _coerce_atts(atts),
+             "tool_steps": steps}  # 仅 session_state 用，不持久化到 DB（避免 schema 改动）
         )
     # 保存错误信息供主区域展示（图片任务报错等不再被静默吞掉）
     if st.session_state.stream_error:
@@ -426,6 +570,7 @@ def finalize_streaming():
     st.session_state.stream_usage = None
     st.session_state.stream_error = None
     st.session_state.stream_attachments = []
+    st.session_state.stream_tool_steps = []
     maybe_auto_name()
 
 
@@ -489,6 +634,15 @@ def streaming_fragment():
             # 图片生成/编辑：助手消息携带的图片附件，finalize 时随消息落库与展示
             for a in (evt.get("attachments") or []):
                 st.session_state.stream_attachments.append(a)
+        elif t == "tool":
+            # agent 工具调用步骤：name + args + status，显示在气泡上方。
+            # status=start 是正常步骤；limit/repeat 是循环守卫触发的提示。
+            st.session_state.stream_tool_steps.append({
+                "name": evt.get("name", ""),
+                "args": evt.get("args") or {},
+                "status": evt.get("status", "start"),
+                "message": evt.get("message"),
+            })
         elif t == "file":
             # 文档自动生成（Function Calling）：助手消息携带的文档附件，
             # 复用图片附件同一条链路，finalize 时落库并渲染为可下载 chip。
@@ -505,6 +659,10 @@ def streaming_fragment():
     # 渲染当前进度的助手气泡
     buf = st.session_state.stream_buffer
     with st.chat_message("assistant", avatar="🤖"):
+        # 工具调用步骤 chips（在内容上方，让用户看见 agent 思考过程，
+        # 解决“一直思考”的观感问题）
+        if st.session_state.stream_tool_steps:
+            render_tool_steps(st.session_state.stream_tool_steps)
         if buf.strip():
             render_content(buf)
         else:
@@ -661,7 +819,73 @@ def delete_confirm_dialog(cid: str, title: str):
         st.rerun()
 
 
+@st.dialog("重命名会话")
+def rename_dialog(cid: str, title: str):
+    """侧边栏 ⋮ → ✎ 重命名 调起的弹窗；对任意会话（含非当前）有效。
+    文本留空时回退为旧标题（通过 apply_rename 内置的等价检查），保证不入空字符串。"""
+    st.write("为该会话设置一个新名称：")
+    new_title = st.text_input(
+        "会话名称",
+        value=title,
+        max_chars=60,
+        key=f"rename_input_{cid}",
+        label_visibility="collapsed",
+    )
+    cols = st.columns(2)
+    if cols[0].button("确认", type="primary", key=f"rename_ok_{cid}"):
+        apply_rename(cid, new_title or title, show_toast=True)
+        st.rerun()
+    if cols[1].button("取消", key=f"rename_cancel_{cid}"):
+        st.rerun()
+
+
 # ================ 侧边栏 ================
+@st.fragment
+def sidebar_conv_list():
+    """历史会话列表 fragment：操作（置顶/重命名/AI整理/删除）只重渲本片段，
+    不打断 chat 区正在进行的 SSE 流式输出。每行单行布局：meta + 标题按钮 + ⋮。
+    重命名走 ⋮ 弹窗（rename_dialog），避免 inline 编辑破坏单行 grid。"""
+    search = st.text_input("🔍 搜索会话", value="", key="conv_search")
+    convs = api.list_conversations(search if search.strip() else None)
+    st.subheader(f"历史会话（{len(convs)}）")
+    for c in convs:
+        _render_one_conv_row(c)
+
+
+def _render_one_conv_row(c: dict):
+    """单条历史会话行：meta + 标题按钮 + ⋮ 菜单（单行 CSS grid 布局）。"""
+    cid = c["id"]
+    prefix = "📌 " if c["pinned"] else ""
+    active = c["id"] == st.session_state.current_cid
+    with st.container(key=f"cp_row_{cid}"):
+        # 1) 左：emoji + 相对时间（CSS grid 的 auto 列）
+        st.markdown(
+            f"<div class='cp-conv-meta'>"
+            f"<span class='cp-conv-emoji'>{_task_icon(c.get('task', ''))}</span>"
+            f"<span class='cp-conv-time'>· {_rel_time(c.get('updated_at', ''))}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        # 2) 中：标题按钮（1fr 列，长时自动 ellipsis；📌 表示钉住）
+        if st.button(f"{prefix}{c['title']}", key=f"cv_{cid}",
+                     type="primary" if active else "secondary"):
+            switch_conversation(cid)
+            st.rerun()
+        # 3) 右：⋮ 菜单 - 置顶 / ✎ 重命名 / 💡 AI 整理 / 🗑 删除
+        with st.popover("⋮", key=f"menu_{cid}", help="更多操作"):
+            pin_label = "取消置顶" if c["pinned"] else "置顶"
+            if st.button(pin_label, key=f"pin_{cid}"):
+                api.update_conversation(cid, pinned=0 if c["pinned"] else 1)
+                st.rerun()
+            if st.button("✎ 重命名", key=f"ren_{cid}"):
+                rename_dialog(cid, c["title"])
+            if c["title"] in ("", "新对话"):
+                if st.button("💡 AI 整理标题", key=f"ai_{cid}"):
+                    ai_retitle(cid)
+                    st.rerun()
+            if st.button("🗑 删除", key=f"del_{cid}"):
+                delete_confirm_dialog(cid, c["title"])
+
 with st.sidebar:
     st.title("🤖 chatbot-plus")
 
@@ -690,33 +914,8 @@ with st.sidebar:
 
     st.divider()
 
-    search = st.text_input("🔍 搜索会话", value="", key="conv_search")
-    convs = api.list_conversations(search if search.strip() else None)
-
-    st.subheader(f"历史会话（{len(convs)}）")
-    for c in convs:
-        row = st.columns([7, 1])
-        prefix = "📌 " if c["pinned"] else ""
-        active = c["id"] == st.session_state.current_cid
-        if row[0].button(f"{prefix}{c['title']}", key=f"cv_{c['id']}",
-                         use_container_width=True,
-                         type="primary" if active else "secondary"):
-            switch_conversation(c["id"])
-            st.rerun()
-        # 右侧「⋯」菜单：点击展开置顶 / 删除
-        with row[1].popover("⋯", use_container_width=True, help="更多操作"):
-            pin_label = "取消置顶" if c["pinned"] else "置顶"
-            if st.button(pin_label, key=f"pin_{c['id']}", use_container_width=True):
-                api.update_conversation(c["id"], pinned=0 if c["pinned"] else 1)
-                st.rerun()
-            if st.button("🗑 删除", key=f"del_{c['id']}", use_container_width=True):
-                delete_confirm_dialog(c["id"], c["title"])
-        # 标题下小字：任务图标 · 相对更新时间
-        st.markdown(
-            f"<div class='cp-conv-meta'>{_task_icon(c.get('task', ''))} · "
-            f"{_rel_time(c.get('updated_at', ''))}</div>",
-            unsafe_allow_html=True,
-        )
+    # 会话列表：抽到 fragment（操作只重渲本片段，不打断 SSE 流）
+    sidebar_conv_list()
 
     # 底部固定区：个人信息 + 参数设置（CSS 据锚点 .cp-bottom-anchor 钉在侧边栏底部）
     with st.container():
@@ -833,6 +1032,9 @@ for m in st.session_state.messages:
     else:
         # 助手：st.chat_message 靠左，保留代码块复制
         with st.chat_message("assistant", avatar="🤖"):
+            # 重新加载的消息也可能含 tool_steps（仅本会话有效）
+            if m.get("tool_steps"):
+                render_tool_steps(m["tool_steps"])
             render_content(m["content"])
             # 助手消息附件（图片生成/编辑结果等）：图片缩略图可点击看大图
             _atts_html = attachments_html(m.get("attachments"))
@@ -929,9 +1131,44 @@ components.html(_cp_components_js(_sugg_for_cards), height=0)
 
 # 聊天输入占位符随任务调整：图片编辑提示上传原图
 _cto = _current_task_obj()
-_in_ph = ("描述修改要求（需先上传原图）…"
-          if (_cto and _cto.get("key") == "image_edit")
-          else "输入消息开始聊天…")
+_base_ph = ("描述修改要求（需先上传原图）…"
+            if (_cto and _cto.get("key") == "image_edit")
+            else "输入消息开始聊天…")
+
+# 工具 chips（豆包风格：紧贴输入框上方一行水平 chip）--
+# 点击 = 选中/取消选中（不发送！）。选中后 chip 高亮，输入框 placeholder 切换为该工具的
+# 示例提示，引导用户输入自己的具体内容；发送时保持用户输入原文，后端 agent 自动选用工具。
+# 仅文本任务显示（图片任务已有自己的提示词模版卡片）。
+_TOOL_PLACEHOLDERS = {
+    "info":   "已选「实时信息」· 输入如：北京今天天气、100 美元换多少人民币…",
+    "github": "已选「GitHub 搜索」· 输入要找的开源库关键词…",
+    "local":  "已选「数学计算」· 输入算式如：(3.14*12**2)/2 …",
+    "image":  "已选「图片生成」· 输入画面描述（主体+环境+光线+风格）…",
+    "doc":    "已选「文档生成」· 输入主题与要求，如：5 页关于 AI 的 PPT…",
+}
+_tool_groups = st.session_state.get("_tool_groups_cache") or api.get_tool_groups()
+st.session_state["_tool_groups_cache"] = _tool_groups
+_selected_tool = st.session_state.get("_selected_tool")  # None 或 group key
+_in_ph = _base_ph
+if _tool_groups and not _is_image_task():
+    with st.container(key="cp_tool_chips"):
+        _chip_cols = st.columns(len(_tool_groups), gap="small")
+        for _i, _g in enumerate(_tool_groups):
+            _gkey = _g.get("key", str(_i))
+            _is_sel = (_selected_tool == _gkey)
+            if _chip_cols[_i].button(
+                    f"{_g.get('icon', '🧩')} {_g.get('name', '')}",
+                    key=f"tool_chip_{_gkey}",
+                    help=f"选中后用「{_g.get('name', '')}」处理你的下一条消息；再点一次取消",
+                    use_container_width=True,
+                    type="primary" if _is_sel else "secondary",
+            ):
+                # 切换选中：再点一次同一个 = 取消
+                st.session_state["_selected_tool"] = None if _is_sel else _gkey
+                st.rerun()
+    # 选中工具后切换 placeholder 引导用户输入
+    if _selected_tool and _selected_tool in _TOOL_PLACEHOLDERS:
+        _in_ph = _TOOL_PLACEHOLDERS[_selected_tool]
 
 prompt = st.chat_input(_in_ph, accept_file="multiple",
                        file_type=_ATTACH_TYPES, disabled=chat_disabled)

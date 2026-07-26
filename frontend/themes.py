@@ -70,20 +70,75 @@ section[data-testid="stSidebar"] h2,
 section[data-testid="stSidebar"] h3 { font-weight: 600; letter-spacing: -0.01em; }
 
 /* 侧边栏底部固定区：把「个人信息 / 参数设置」钉在侧边栏底部，历史会话在其上方滚动。
-   用 st.container() + .cp-bottom-anchor 标记底部区；嵌套 stVerticalBlock 选择器
-   （[stVerticalBlock] [stVerticalBlock]）只命中容器自身，不误伤根容器导致整栏不滚动。 */
-[data-testid="stSidebar"] [data-testid="stVerticalBlock"] [data-testid="stVerticalBlock"]:has(.cp-bottom-anchor) {
+   关键：sticky 元素的「包含块」必须是整段可滚动内容，滚动全程才会贴底。
+   Streamlit 1.60 实测 DOM：
+     stSidebarContent(overflow:auto 滚动容器)
+       > stSidebarUserContent > root stVerticalBlock(整段内容,~1625px)
+         > …(标题/新建/历史会话)…
+         > stLayoutWrapper(st.container 壳) > stVerticalBlock > stElementContainer(.cp-bottom-anchor)
+   若把 sticky 加在内层 stVerticalBlock：其包含块是 stLayoutWrapper(仅 ~140px,
+   只够装底部块自身) -> 只有滚到最底才贴底(即用户反馈的"只在最底部")。
+   改加在 stLayoutWrapper：其包含块是 root stVerticalBlock(整段内容) -> 滚动全程贴底。 */
+[data-testid="stSidebar"] [data-testid="stLayoutWrapper"]:has(.cp-bottom-anchor) {
   position: sticky; bottom: 0; z-index: 2;
   background: var(--material-bg);
   backdrop-filter: var(--material-blur);
   -webkit-backdrop-filter: var(--material-blur);
-  margin-top: .4rem; padding-top: .4rem;
+  margin-top: .35rem;
+  padding: .55rem .15rem .4rem;
   border-top: 1px solid var(--hairline);
+  box-shadow: 0 -8px 18px -10px rgba(0,0,0,.08);    /* 顶部微阴影，强化"浮起"层级 */
 }
-/* 底部区内部展开器不要额外外边距，紧凑些 */
-[data-testid="stSidebar"] [data-testid="stVerticalBlock"] [data-testid="stVerticalBlock"]:has(.cp-bottom-anchor) details {
-  margin-top: .2rem;
+[data-testid="stSidebar"] [data-testid="stLayoutWrapper"]:has(.cp-bottom-anchor) details {
+  margin-top: .18rem;
 }
+
+/* 底部 sticky 区：expander 展开时不能撑爆 viewport；用 max-height + 内部滚动，
+   防止长参数列表把整个 sidebar 推出屏幕底部，让 dock 始终贴底。 */
+[data-testid="stSidebar"] [data-testid="stLayoutWrapper"]:has(.cp-bottom-anchor) details > div {
+  max-height: calc(100vh - 320px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* ---------- 输入区上方工具 chips（豆包风格：选中态）---------- */
+/* chips 点击切换选中（type=primary 即高亮）；未选中=浅底。
+   JS（dockChips）会把 .st-key-cp_tool_chips 设为 position:fixed 钉到输入坞正上方，
+   并加 .cp-chips-docked 类给材质底（消息从下方滚入时透出，与输入坞一致）。 */
+.st-key-cp_tool_chips {
+  margin: .2rem 0 .15rem;
+  padding: .15rem 0;
+}
+/* 钉到输入坞上方后的材质底：半透明 + 模糊，遮住从下方滚入的消息 */
+.st-key-cp_tool_chips.cp-chips-docked {
+  margin: 0 !important;
+  padding: .35rem .5rem .25rem !important;
+  background: var(--material-bg) !important;
+  backdrop-filter: var(--material-blur);
+  -webkit-backdrop-filter: var(--material-blur);
+  box-shadow: 0 -8px 18px -10px rgba(0,0,0,.06);
+}
+.st-key-cp_tool_chips .stButton button {
+  border-radius: 999px !important;
+  padding: 3px 10px !important;
+  font-size: .78rem !important;
+  min-height: 0 !important;
+  white-space: nowrap;
+  transition: background var(--dur-press) var(--ease-out),
+              border-color var(--dur-press) var(--ease-out),
+              transform var(--dur-press) var(--ease-out);
+}
+/* 未选中：浅底；hover 微抬 + 描边 */
+.st-key-cp_tool_chips .stButton button[kind="secondary"] {
+  background: var(--accent-soft) !important;
+  border: 1px solid transparent !important;
+  color: var(--text) !important;
+}
+.st-key-cp_tool_chips .stButton button[kind="secondary"]:hover {
+  border-color: var(--accent) !important;
+  transform: translateY(-1px);
+}
+/* 选中态走 streamlit primary 自带样式，这里只统一圆角与字号（上面已覆盖）*/
 
 /* ---------- 主标题 / 分隔 ---------- */
 .stApp h1 { font-weight: 650; letter-spacing: -0.02em; line-height: 1.08; }  /* 大字：负字距 + 紧行高 */
@@ -218,16 +273,99 @@ section[data-testid="stMain"] [data-testid="stVerticalBlock"] [data-testid="stVe
   box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow) !important;
 }
 
+/* ---------- 输入框内左侧留白：避开纸夹列，文字/占位字符都不贴边 ---------- */
+/* Streamlit 实际渲染：textarea 有自己的 testid=stChatInputTextArea，容器是 class="stChatInput" */
+[data-testid="stChatInputTextArea"] {
+  padding-left: 3rem !important;        /* 主输入框留出 3rem 给纸夹图标 + 呼吸距离 */
+}
+.stChatInput [data-testid="stChatInputPlaceholder"],
+.stChatInput [class*="Placeholder"] {
+  left: 3rem !important; right: 1rem !important; width: auto !important;
+}
+
+/* ---------- 纸夹图标：从灰小点变成主色大按钮 ---------- */
+/* 真 DOM：
+   .stChatInput > div > div > div[data-testid="stChatInputFileUploadButton"]
+                   > button[aria-label="Upload files"] (装 SVG + 隐藏 input) */
+.stChatInput [data-testid="stChatInputFileUploadButton"] {
+  cursor: pointer;
+  border-radius: 10px;
+  margin: .15rem .25rem .15rem 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: background var(--dur-press) var(--ease-out),
+              transform var(--dur-press) var(--ease-out);
+}
+.stChatInput [data-testid="stChatInputFileUploadButton"]:hover {
+  background: var(--accent-soft);
+  transform: scale(1.08);
+}
+.stChatInput [data-testid="stChatInputFileUploadButton"]:active {
+  transform: scale(0.94);
+}
+.stChatInput [data-testid="stChatInputFileUploadButton"] svg {
+  width: 1.35rem !important; height: 1.35rem !important;
+  color: var(--accent) !important;
+}
+.stChatInput [data-testid="stChatInputFileUploadButton"] svg path { fill: currentColor; }
+
 /* ---------- 弹层 / 折叠面板：随主题，避免深色下突兀的白卡 ----------
    popover / dialog / 下拉选项由 Streamlit 渲染到 body 下的 portal，不在 .stApp 内，
    默认是白底深字；深色主题下虽可读但风格割裂，这里统一用 --surface/--text/--border。
    stExpander 同理（侧边栏“个人信息/参数设置”、主区“复制全文”都用到）。 */
 [data-testid="stPopover"], [data-testid="stPopoverBody"],
-[data-testid="stDialog"], [data-testid="stDialogBody"],
 [data-testid="stSelectboxVirtualDropdown"] {
   background: var(--surface) !important;
   color: var(--text) !important;
   border: 1px solid var(--border) !important;
+}
+
+/* ---------- @st.dialog（删除确认弹窗）：圆角 + 软阴影 + 缩放淡入 + 半透模糊 backdrop ---------- */
+/* Streamlit 1.43 stDialog 用一个 fixed 全屏 div (inset:0) 同时扮演 wrapper 和 backdrop。
+   真正的内容卡片是它内部第一个 emotion div（限制宽度居中）。这里把 stDialog 自身
+   设为半透+模糊（=backdrop），并把真正的卡片视觉抽出来套在它的直接子 div 上。 */
+[data-testid="stDialog"] {
+  background: rgba(0,0,0,.45) !important;
+  backdrop-filter: blur(6px) saturate(140%);
+  -webkit-backdrop-filter: blur(6px) saturate(140%);
+  animation: cp-dialog-backdrop-in var(--dur-pop) var(--ease-out) both;
+}
+/* 真正的卡片：stDialog 的直接子 emotion div */
+[data-testid="stDialog"] > div {
+  background: var(--surface) !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 16px !important;
+  overflow: hidden !important;
+  box-shadow:
+    0 24px 48px -12px rgba(0,0,0,.28),
+    0 8px 16px -6px  rgba(0,0,0,.18),
+    0 0 0 1px        rgba(0,0,0,.04) !important;
+  transform-origin: center center;
+  animation: cp-dialog-in var(--dur-pop) var(--ease-out) both;
+}
+[data-testid="stDialogBody"] {
+  background: var(--surface) !important;
+  color: var(--text) !important;
+  padding: .25rem .25rem .5rem !important;
+}
+@keyframes cp-dialog-in {
+  from { opacity: 0; transform: scale(.96); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes cp-dialog-backdrop-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+/* 删除主按钮走"危险红"：复用已有 #e5484d（同色复用，非新颜色） */
+[data-testid="stDialog"] .stButton > button[kind="primary"] {
+  background: #e5484d !important;
+  border-color: #e5484d !important;
+  color: #fff !important;
+}
+[data-testid="stDialog"] .stButton > button[kind="primary"]:hover {
+  background: #d23a3f !important;
+  border-color: #d23a3f !important;
+  filter: none !important;
 }
 [data-testid="stSelectboxVirtualDropdown"] [role="option"],
 [data-testid="stSelectboxVirtualDropdown"] span { color: var(--text) !important; }
@@ -340,6 +478,19 @@ section[data-testid="stMain"] [data-testid="stVerticalBlock"] [data-testid="stVe
 [data-testid="stChatMessage"].cp-streaming,
 [data-testid="stChatMessage"].cp-thinking-bubble { animation: cp-pop var(--dur-pop) var(--ease-out); }
 @keyframes cp-pop { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* ============ 工具调用步骤 chips（agent 透明化） ============ */
+.cp-tool-steps { margin: 0 0 .45rem 0; padding: .35rem .6rem .45rem; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+.cp-tool-steps > summary { cursor: pointer; user-select: none; display: flex; align-items: center; gap: .5rem; font-size: .82rem; color: var(--text-muted); }
+.cp-tool-steps > summary b { color: var(--text); font-weight: 600; }
+.cp-step-count { display: inline-block; min-width: 18px; padding: 0 .4rem; height: 18px; line-height: 18px; border-radius: 9px; background: var(--accent); color: #fff; font-size: .72rem; text-align: center; }
+.cp-step-list { list-style: none; padding: .35rem 0 0; margin: 0; }
+.cp-step { display: flex; gap: .4rem; align-items: center; padding: .15rem 0; font-size: .8rem; color: var(--text); }
+.cp-step-icon { width: 18px; }
+.cp-step-name { background: var(--surface); padding: 1px 6px; border-radius: 6px; font-family: ui-monospace, SFMono-Regular, monospace; font-size: .75rem; border: 1px solid var(--border); color: var(--accent-strong); }
+.cp-step-args { color: var(--text-muted); font-size: .75rem; }
+.cp-step-warn .cp-step-name { color: #c0392b; border-color: #e8b4af; background: #fff5f3; }
+.cp-step-warn .cp-step-args { color: #c0392b; font-weight: 500; }
 /* 停止按钮：胶囊 + 脉冲圆点 */
 .cp-stop-btn {
   border-radius: 999px !important; padding: .28rem .9rem !important;
@@ -402,6 +553,89 @@ section[data-testid="stMain"] [data-testid="stVerticalBlock"] [data-testid="stVe
 /* ============ 侧边栏会话项小字 ============ */
 .cp-conv-meta { font-size: .7rem; color: var(--text-muted); padding: 0 .15rem .3rem; margin-top: -.2rem; opacity: .8; letter-spacing: 0.01em; }
 
+/* ============ 侧边栏会话项（单行 pill: meta | title | ⋮） ============ */
+/* 单一 stVerticalBlock 内三子（app.py 显式按视觉顺序渲染）：
+     1) meta div (stElementContainer)         — 左  "meta"
+     2) title button (stElementContainer.cv_) — 中  "title"
+     3) popover (stLayoutWrapper.menu_)       — 右  "menu"
+   用属性选择器精确锚定，避开 nth-of-type 的歧义（popover 不是 stElementContainer）。
+   单行三列 grid：auto | minmax(0,1fr) | auto — 中列用 minmax(0,1fr) 才能真正 ellipsis。 */
+section[data-testid="stSidebar"] [data-testid="stVerticalBlock"][class*="st-key-cp_row_"] {
+  display: grid !important;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: "meta title menu";
+  column-gap: .4rem;
+  row-gap: 0;
+  align-items: center;
+  margin: 0 -.5rem .22rem;
+  padding: .35rem .5rem;
+  border-radius: 10px;
+  transition: background var(--dur-press) var(--ease-out);
+}
+section[data-testid="stSidebar"] [data-testid="stVerticalBlock"][class*="st-key-cp_row_"]:hover {
+  background: var(--accent-soft);
+}
+/* 激活态：标题按钮 kind=primary ⇒ 整行高亮 */
+section[data-testid="stSidebar"] [data-testid="stVerticalBlock"][class*="st-key-cp_row_"]:has([class*="st-key-cv_"] button[kind="primary"]) {
+  background: var(--accent-soft);
+}
+
+/* 左：meta（stElementContainer 是 grid item，内部 stMarkdown/stMarkdownContainer 都不撑高；
+   让这个 container 自身 stretch + flex，对里面的 .cp-conv-meta 做垂直居中） */
+section[data-testid="stSidebar"] [data-testid="stVerticalBlock"][class*="st-key-cp_row_"]
+  > [data-testid="stElementContainer"]:has(.cp-conv-meta) {
+  grid-area: meta;
+  min-width: 0; max-width: 100%;
+  height: 100%;
+  display: flex; align-items: center;     /* 把里面的 .cp-conv-meta 居中到 grid row 中线 */
+}
+section[data-testid="stSidebar"] [data-testid="stVerticalBlock"][class*="st-key-cp_row_"]
+  > [data-testid="stElementContainer"]:has(.cp-conv-meta) .cp-conv-meta {
+  font-size: .68rem;
+  color: var(--text-muted);
+  opacity: .9;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.15;
+  margin: 0 !important; padding: 0 !important;
+  display: flex; align-items: center; gap: .15rem;
+}
+section[data-testid="stSidebar"] [data-testid="stVerticalBlock"][class*="st-key-cp_row_"]
+  > [data-testid="stElementContainer"]:has(.cp-conv-meta) .cp-conv-meta .cp-conv-emoji {
+  display: inline-block; font-size: .9rem; line-height: 1;
+  vertical-align: middle;
+}
+section[data-testid="stSidebar"] [data-testid="stVerticalBlock"][class*="st-key-cp_row_"]
+  > [data-testid="stElementContainer"] .cp-conv-meta .cp-conv-time {
+  color: var(--text-muted);
+}
+
+/* 中：title button */
+section[data-testid="stSidebar"] [data-testid="stVerticalBlock"][class*="st-key-cp_row_"]
+  [class*="st-key-cv_"] { grid-area: title; min-width: 0; }
+section[data-testid="stSidebar"] [data-testid="stVerticalBlock"][class*="st-key-cp_row_"]
+  [class*="st-key-cv_"] .stButton > button {
+  width: 100%;
+  min-width: 0;                   /* 让 ellipsis 真正生效 */
+  justify-content: flex-start; text-align: left;
+  border-radius: 8px !important;
+  padding: .35rem .55rem !important;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  display: block;
+}
+
+/* 右：⋮ menu */
+section[data-testid="stSidebar"] [data-testid="stVerticalBlock"][class*="st-key-cp_row_"]
+  [class*="st-key-menu_"] { grid-area: menu; }
+section[data-testid="stSidebar"] [data-testid="stVerticalBlock"][class*="st-key-cp_row_"]
+  [class*="st-key-menu_"] [data-testid="stPopover"] button {
+  border-radius: 8px !important;
+  padding: .3rem .45rem !important;
+  min-width: 1.9rem; font-size: .9rem;
+}
+
 /* ============ JS 注入用 iframe（components.html, height=0）：确保不占版面 ============ */
 [data-testid="stIFrame"] { min-height: 0 !important; line-height: 0; }
 [data-testid="stIFrame"] iframe { border: 0; }
@@ -436,7 +670,7 @@ section[data-testid="stMain"] [data-testid="stVerticalBlock"] [data-testid="stVe
   /* 材质层转实色，去掉 blur */
   [data-testid="stChatInput"],
   section[data-testid="stMain"] [data-testid="stVerticalBlock"] [data-testid="stVerticalBlock"]:has(.cp-topbar-anchor),
-  [data-testid="stSidebar"] [data-testid="stVerticalBlock"] [data-testid="stVerticalBlock"]:has(.cp-bottom-anchor) {
+  [data-testid="stSidebar"] [data-testid="stLayoutWrapper"]:has(.cp-bottom-anchor) {
     background: var(--surface) !important;
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;

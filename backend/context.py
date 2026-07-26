@@ -43,7 +43,7 @@ async def build_llm_messages(
     threshold: int,
     keep_turns: int,
 ) -> tuple[list[dict], bool]:
-    """组装发给 LLM 的 messages。
+    """组装发给 LLM 的 messages（OpenAI dict 格式，给非 FC 兜底路径用）。
 
     返回 (messages, compressed)：
     - messages: 最终发给大模型的消息列表
@@ -71,3 +71,47 @@ async def build_llm_messages(
         return parts, True
 
     return parts, False
+
+
+async def build_lc_messages(
+    conversation: dict,
+    messages: list[dict],
+    threshold: int,
+    keep_turns: int,
+) -> tuple[list[dict], bool]:
+    """组装发给 LangChain agent 的 messages（dict 格式，可直接喂给 create_agent）。
+    与 build_llm_messages 共用压缩逻辑，差别仅：不本地拼"任务系统提示 system 消息"——
+    改由 create_agent 的 system_prompt 参数自动前置，避免重复占用预算。
+
+    注意：lives 不要包含摘要里已经覆盖的历史；摘要通过 conversation['summary'] 提供。
+    返回 (messages, compressed) 同上。
+    """
+    summary = conversation.get("summary") or ""
+    summary_until = conversation.get("summary_until_msg_id") or ""
+    live = _live_messages(messages, summary_until)
+
+    # 估算 -> 超阈值 -> 压缩
+    keep_n = max(keep_turns * 2, 2)
+    parts_summary_preview = (
+        [{"role": "system", "content": f"以下是之前对话的摘要，供你参考：\n{summary}"}]
+        if summary else []
+    )
+    est_msgs = parts_summary_preview + [_to_llm_role(m) for m in live]
+    compressed = False
+    if estimate_messages_tokens(est_msgs) > threshold and len(live) > keep_n + 2:
+        to_summarize = live[:-keep_n]
+        new_summary = await summarize_messages(
+            [_to_llm_role(m) for m in to_summarize], summary
+        )
+        until_id = to_summarize[-1]["id"]
+        db.set_conversation_summary(conversation["id"], new_summary, until_id)
+        live = live[-keep_n:]
+        summary = new_summary
+        compressed = True
+
+    # 构造喂给 agent 的消息列表：摘要作为 system 消息，然后是活跃 user/assistant 对
+    out: list[dict] = []
+    if summary:
+        out.append({"role": "system", "content": f"以下是之前对话的摘要，供你参考：\n{summary}"})
+    out.extend(_to_llm_role(m) for m in live)
+    return out, compressed
