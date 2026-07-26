@@ -40,3 +40,7 @@
 {"ts": 1784992672.3932, "run_id": "2b7d578a4e4b43c2bc9bc09c82a18d87", "event": "stop", "elapsed_ms": 8684, "tool_calls": 1, "tokens": 300007, "limit": false}
 {"ts": 1784992919.4498, "run_id": "f59f7ab048fd4f1ab7377a08f8fff51f", "event": "start", "conv_id": "4d3719a071e642859e6574476af0c515", "model": "deepseek-ai/DeepSeek-V4-Pro"}
 {"ts": 1784992922.1734, "run_id": "f59f7ab048fd4f1ab7377a08f8fff51f", "event": "tool_start", "name": "get_weather", "args": {"city": "北京"}}
+{"ts": 1785027492.728, "run_id": "2428ec8346374bbb8e9f49d6e9580f79", "event": "start", "conv_id": "4d40aa00e337498e93ea1d8053d5ad37", "model": "deepseek-ai/DeepSeek-V4-Pro"}
+{"ts": 1785027497.878, "run_id": "2428ec8346374bbb8e9f49d6e9580f79", "event": "tool_start", "name": "calculate", "args": {"expression": "(3.14 * 12 ** 2) / 2"}}
+{"ts": 1785027501.0441, "run_id": "2428ec8346374bbb8e9f49d6e9580f79", "event": "usage", "prompt": 280280, "completion": 6427, "tool_calls": 1, "limit_hit": false}
+{"ts": 1785027501.0445, "run_id": "2428ec8346374bbb8e9f49d6e9580f79", "event": "stop", "elapsed_ms": 8316, "tool_calls": 1, "tokens": 286707, "limit": false}
