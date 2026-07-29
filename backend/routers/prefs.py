@@ -58,3 +58,11 @@ def upload_avatar(file: UploadFile = File(...)):
     url = f"/avatars/{save_name}"
     db.update_prefs(avatar_path=url)
     return {"code": 200, "avatar_path": url}
+
+
+@router.post("/prefs/profile/reset")
+def reset_profile():
+    """用户主动重置隐式画像：intent / detail_level / signals 全清回默认。"""
+    from profile.classifier import reset_profile
+    reset_profile()
+    return {"code": 200, "prefs": db.get_prefs()}

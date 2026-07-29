@@ -20,3 +20,5 @@ logs/*.pid
 # 局域网访问扩展（独立脚本，不入库；与主程序隔离的小扩展）
 run_lan.sh
 frontend/app_lan.py
+
+专业实践报告.md

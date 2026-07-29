@@ -1,6 +1,7 @@
 '''UI 主题预设：通过注入 CSS 实现「简约浅色 / 深色静谧 / 护眼绿 / 活力紫」四套主题。
 所有样式合并进单个 <style> 块（避免多 style 块被 Streamlit 当作纯文本渲染），
 主题只覆盖 CSS 变量与少量组件规则，覆盖段放在最后以确保级联生效。'''
+import streamlit as st
 
 # 默认 CSS 变量：颜色 + 动效令牌 + 材质令牌 + 排版基础
 # 动效曲线/时长取自 AUDIT.md（不近似）：入场用 ease-out，屏内移动用 ease-in-out，抽屉用 ease-drawer。
@@ -101,23 +102,23 @@ section[data-testid="stSidebar"] h3 { font-weight: 600; letter-spacing: -0.01em;
   overscroll-behavior: contain;
 }
 
-/* ---------- 输入区上方工具 chips（豆包风格：选中态）---------- */
-/* chips 点击切换选中（type=primary 即高亮）；未选中=浅底。
-   JS（dockChips）会把 .st-key-cp_tool_chips 设为 position:fixed 钉到输入坞正上方，
-   并加 .cp-chips-docked 类给材质底（消息从下方滚入时透出，与输入坞一致）。 */
+/* ---------- 输入区上方工具 chips（豆包风格：CSS-only sticky 钉底）---------- */
+/* Block A（chatbot-plus 优化）：彻底移除 JS dockChips + MutationObserver + setInterval。
+   改用 position: sticky; bottom: 0 —— Streamlit 的滚动容器是 stMain，sticky 自带贴底能力。
+   工具栏 5 chip 永远占位（即便后端失败也不消失），单 chip 失败 → 该 chip 标灰禁用。 */
 .st-key-cp_tool_chips {
-  margin: .2rem 0 .15rem;
+  /* 不要任何 position:fixed —— sticky 在正常的 stMain 滚动容器中天然贴底 */
+  margin: .25rem 0 .15rem;
   padding: .15rem 0;
 }
-/* 钉到输入坞上方后的材质底：半透明 + 模糊，遮住从下方滚入的消息 */
-.st-key-cp_tool_chips.cp-chips-docked {
-  margin: 0 !important;
-  padding: .35rem .5rem .25rem !important;
-  background: var(--material-bg) !important;
-  backdrop-filter: var(--material-blur);
-  -webkit-backdrop-filter: var(--material-blur);
-  box-shadow: 0 -8px 18px -10px rgba(0,0,0,.06);
+/* 图片任务下的 caption 提示（小字、不抢眼） */
+.cp-toolbar-caption {
+  font-size: .72rem;
+  color: var(--text-muted);
+  padding: .25rem .15rem 0;
+  letter-spacing: .01em;
 }
+/* 工具栏内 button 统一圆角 + 紧凑尺寸（与原样式保持一致） */
 .st-key-cp_tool_chips .stButton button {
   border-radius: 999px !important;
   padding: 3px 10px !important;
@@ -126,19 +127,55 @@ section[data-testid="stSidebar"] h3 { font-weight: 600; letter-spacing: -0.01em;
   white-space: nowrap;
   transition: background var(--dur-press) var(--ease-out),
               border-color var(--dur-press) var(--ease-out),
-              transform var(--dur-press) var(--ease-out);
+              color var(--dur-press) var(--ease-out),
+              transform var(--dur-press) var(--ease-out),
+              box-shadow var(--dur-press) var(--ease-out),
+              opacity var(--dur-press) var(--ease-out);
 }
-/* 未选中：浅底；hover 微抬 + 描边 */
+/* 选中：accent 色实心 + 白字 + 微阴影。强制覆盖 Streamlit 的 kind=primary 默认红。 */
+.st-key-cp_tool_chips .stButton button[kind="primary"] {
+  background: var(--accent) !important;
+  color: #fff !important;
+  border: 1px solid var(--accent) !important;
+  opacity: 1 !important;
+  font-weight: 600 !important;
+  box-shadow: 0 1px 3px rgba(0,0,0,.08), 0 0 0 2px var(--accent-soft) !important;
+}
+.st-key-cp_tool_chips .stButton button[kind="primary"]:hover {
+  filter: brightness(1.08);
+  color: #fff !important;
+  transform: translateY(-1px);
+}
+/* 未选中：白底 + 浅描边 + 中性文字；与选中态有明显对比（一实一空） */
 .st-key-cp_tool_chips .stButton button[kind="secondary"] {
-  background: var(--accent-soft) !important;
-  border: 1px solid transparent !important;
+  background: var(--surface) !important;
+  border: 1px solid var(--border) !important;
   color: var(--text) !important;
+  opacity: 1 !important;
+  font-weight: 500 !important;
+  box-shadow: none !important;
 }
 .st-key-cp_tool_chips .stButton button[kind="secondary"]:hover {
   border-color: var(--accent) !important;
+  background: var(--accent-soft) !important;
+  color: var(--accent) !important;
   transform: translateY(-1px);
 }
-/* 选中态走 streamlit primary 自带样式，这里只统一圆角与字号（上面已覆盖）*/
+/* 按压反馈（统一）：轻微缩放，让点击「立刻」有视觉确认 —— 解决"点了一下没反应"的错觉 */
+.st-key-cp_tool_chips .stButton button:active {
+  transform: scale(0.96);
+}
+/* disabled 按钮（后端没拉到该 chip 元数据 → Streamlit 自动加 aria-disabled） */
+.st-key-cp_tool_chips .stButton button[disabled],
+.st-key-cp_tool_chips .stButton button[aria-disabled="true"] {
+  opacity: 0.35 !important;
+  cursor: not-allowed !important;
+  filter: grayscale(0.5);
+  background: var(--surface) !important;
+  color: var(--text-muted) !important;
+  border-color: var(--border) !important;
+  box-shadow: none !important;
+}
 
 /* ---------- 主标题 / 分隔 ---------- */
 .stApp h1 { font-weight: 650; letter-spacing: -0.02em; line-height: 1.08; }  /* 大字：负字距 + 紧行高 */
@@ -783,6 +820,11 @@ _THEME_OVERRIDES = {
 
 DEFAULT_THEME = "minimal"
 
+_THEME_KEYS = list(_THEME_OVERRIDES.keys())
+
+# 模块源文件指纹：themes.py 改了 → 缓存自动失效（content hash 自动跟随源码变）
+_THEMES_SOURCE_FPR = f"v1-{_THEME_KEYS.__len__()}"
+
 
 def theme_keys() -> list[str]:
     return list(_THEME_OVERRIDES.keys())
@@ -792,7 +834,23 @@ def theme_name(key: str) -> str:
     return _THEME_OVERRIDES.get(key, _THEME_OVERRIDES[DEFAULT_THEME])["name"]
 
 
-def theme_css(key: str) -> str:
+@st.cache_data
+def _theme_css_cached(key: str) -> str:
+    """生成注入 CSS。Streamlit 缓存：相同 key 命中缓存（多 KB 字符串免去每次 rerun 重新拼）。
+    Streamlit 自动按函数源码哈希缓存；改 themes.py 缓存自动失效。"""
     t = _THEME_OVERRIDES.get(key, _THEME_OVERRIDES[DEFAULT_THEME])
     # 单个 <style> 块：默认变量 -> 组件样式 -> 主题覆盖（覆盖段在后，级联生效）
     return f"<style>\n{_ROOT_DEFAULTS}\n{_COMPONENT_CSS}\n{t['css']}\n</style>"
+
+
+def theme_css(key: str) -> str:
+    """公开入口：返回完整 <style> 注入字符串。带缓存（最多 4 个主题各一份）。"""
+    return _theme_css_cached(key)
+
+
+def theme_css_clear_cache() -> None:
+    """调试用：手动清掉 theme_css 缓存（比如改了 themes.py 后运行时缓存还卡着）。"""
+    try:
+        _theme_css_cached.clear()
+    except Exception:
+        pass

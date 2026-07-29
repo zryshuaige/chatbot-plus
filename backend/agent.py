@@ -21,9 +21,12 @@
 
 这里不直接产 sse：agent_stream() 返回 async iterator[dict|str]，
 由 routers/chat.py 序列化为 text/event-stream 字符串。
+SSE 批处理：相邻的 token 事件会被合并成单条 `token` 事件，
+大小阈值或超时（50ms）触发 flush——减少 SSE 包数与前端组件重渲压力。
 '''
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Any, AsyncIterator
@@ -45,6 +48,89 @@ RECURSION_LIMIT = settings.agent_recursion_limit
 MAX_AGENT_STEPS = settings.agent_max_steps
 MAX_STEP_SOFT = max(1, settings.agent_max_steps - 1)
 REPEAT_TOLERANCE = 2
+
+# SSE 批处理：相邻 token 事件累积到 ≥32 字符或 ≥50ms 就 flush。
+# 平衡"流畅度"与"前端组件渲染压力"——32 字符 ≈ 一个中文字符，体感延迟 < 100ms。
+SSE_BATCH_MAX_CHARS = 32
+SSE_BATCH_MAX_MS = 50
+
+# _batch_token_events 用于标记生成器结束的哨兵对象（不能用 None：事件本身可能是 None）
+_SENTINEL = object()
+
+
+async def _batch_token_events(source: AsyncIterator[dict]) -> AsyncIterator[dict]:
+    """把源异步迭代器里相邻的 token 事件合并成单条 yield，其它类型事件原样透传。
+
+    设计要点：
+    - token 累积达到 SSE_BATCH_MAX_CHARS 字符数立即 flush（避免小消息延迟）
+    - 未达阈值则等 SSE_BATCH_MAX_MS 后 flush（保证最坏延迟，避免长间隔静默）
+    - 非 token 事件到来时立即 flush 当前 buffer + 透传新事件（让工具事件不延迟）
+
+    !!! 实现注意：不能用 asyncio.wait_for(source.__anext__(), timeout=...) 直接包生成器
+    的 __anext__()——超时会 cancel 内部正在 await 的 astream_events 调用，破坏流式生成器
+    状态，导致它永远拿不到首包（实测 50ms 超时反复 cancel 后 actor 完全卡死）。
+    解法：用后台 task 把 gen 事件泵入 asyncio.Queue，主循环 wait_for(queue.get())。
+    cancel 只作用于 queue.get（轻量、可重试），不触碰生成器本体。
+    """
+    q: asyncio.Queue = asyncio.Queue()
+
+    async def _pump():
+        try:
+            async for evt in source:
+                await q.put(evt)
+        except Exception as e:
+            await q.put(e)
+        finally:
+            await q.put(_SENTINEL)
+
+    pump_task = asyncio.create_task(_pump())
+    buf = ""
+    timeout_s = SSE_BATCH_MAX_MS / 1000
+
+    try:
+        while True:
+            try:
+                evt = await asyncio.wait_for(q.get(), timeout=timeout_s)
+            except asyncio.TimeoutError:
+                # 超时期间没有新事件：把已累积的 token 先 flush，保持体感响应
+                if buf:
+                    yield {"type": "token", "content": buf}
+                    buf = ""
+                continue
+
+            if evt is _SENTINEL:
+                # 生成器结束：flush 剩余 buffer
+                if buf:
+                    yield {"type": "token", "content": buf}
+                return
+
+            if isinstance(evt, Exception):
+                # 生成器抛异常：先 flush buffer 再透传 error
+                if buf:
+                    yield {"type": "token", "content": buf}
+                    buf = ""
+                yield {"type": "error", "message": str(evt)}
+                return
+
+            if evt.get("type") == "token":
+                buf += evt.get("content", "")
+                if len(buf) >= SSE_BATCH_MAX_CHARS:
+                    yield {"type": "token", "content": buf}
+                    buf = ""
+            else:
+                # 非 token 事件：先 flush 当前 buffer 再透传
+                if buf:
+                    yield {"type": "token", "content": buf}
+                    buf = ""
+                yield evt
+    finally:
+        # 主消费者提前结束（如客户端断连）：取消后台 pump，避免泄漏
+        if not pump_task.done():
+            pump_task.cancel()
+            try:
+                await pump_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 # ======================================================================
@@ -173,7 +259,13 @@ async def agent_stream(
     - {"type": "error", "message": ...}
     """
     conv_id = conv.get("id", "")
-    task_prompt = get_prompt(conv.get("task"))
+    # 注入隐式用户画像：让任务提示词按用户提问风格做"轻"微调
+    prefs = db.get_prefs()
+    task_prompt = get_prompt(
+        conv.get("task"),
+        user_intent=prefs.get("user_intent") or "general",
+        detail_level=prefs.get("detail_level") or "normal",
+    )
 
     # 给 edit_image 等注入 conv_id
     tools = _inject_runtime_args(ALL_TOOLS, conv_id)
@@ -259,11 +351,16 @@ async def agent_stream(
                     chunk = data.get("chunk")
                     if not chunk:
                         continue
-                    # 累积 token 用量（每 chunk 可能带 usage_metadata）
+                    # 累积 token 用量（每 chunk 可能带 usage_metadata）。
+                    # 修复 bug：原本用 max()，会把"后续 chunk 较小值"覆盖"已有最大值"，导致
+                    # 末端 usage 比实际小一截。改成"取最后一个非 None 值"——
+                    # OpenAI/兼容协议通常只让最后一个 chunk 带完整 usage_metadata。
                     um = getattr(chunk, "usage_metadata", None)
                     if um:
-                        total_prompt = max(total_prompt, int(um.get("input_tokens", 0)))
-                        total_completion = max(total_completion, int(um.get("output_tokens", 0)))
+                        if um.get("input_tokens") is not None:
+                            total_prompt = int(um["input_tokens"])
+                        if um.get("output_tokens") is not None:
+                            total_completion = int(um["output_tokens"])
                     content = getattr(chunk, "content", None)
                     if content:
                         final_text_started = True
@@ -277,10 +374,13 @@ async def agent_stream(
                     out = data.get("output")
                     if out is not None:
                         # 当轮结束：检查是否 loop_limit 触发 -> 追加提示
+                        # 同样：取最后值而非 max()
                         um = getattr(out, "usage_metadata", None)
                         if um:
-                            total_prompt = max(total_prompt, int(um.get("input_tokens", 0)))
-                            total_completion = max(total_completion, int(um.get("output_tokens", 0)))
+                            if um.get("input_tokens") is not None:
+                                total_prompt = int(um["input_tokens"])
+                            if um.get("output_tokens") is not None:
+                                total_completion = int(um["output_tokens"])
 
                 elif kind == "on_chain_end" and name == "LangGraph":
                     # 整轮结束

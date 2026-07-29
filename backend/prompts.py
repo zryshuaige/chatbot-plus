@@ -103,11 +103,56 @@ TASK_PROMPTS: dict[str, dict] = {
 CUSTOM_DEFAULT_PROMPT = "你是一个有用的助手，请根据用户需求给出清晰、准确的回答。"
 
 
-def get_prompt(task: Optional[str]) -> str:
-    """根据任务代号取系统提示词；找不到则回退到自定义默认。"""
+# ---- 隐式用户画像后缀（要"轻"，只追加不替换，绝不显著改变输出）----
+# 这些后缀拼在任务提示词尾部，让模型按用户偏好微调风格，但不强制改变内容。
+# 用户无感，UI 上仅一个 emoji caption 显示当前模式。
+_PROFILE_INTENT_SUFFIX = {
+    "research": (
+        "\n\n[背景] 用户提问风格倾向研究型：回答时优先给出依据与推理过程，"
+        "必要时列出关键概念的定义；不要堆砌未经证实的断言。"
+    ),
+    "learn": (
+        "\n\n[背景] 用户提问风格倾向学习入门：回答时优先给具体例子与步骤拆解，"
+        "避免一次性抛太多抽象术语。"
+    ),
+    "creative": (
+        "\n\n[背景] 用户提问风格倾向创意表达：回答可更自由、更多修辞与意象，"
+        "不必拘泥标准格式。"
+    ),
+    "general": "",  # 默认无追加
+}
+_PROFILE_DETAIL_SUFFIX = {
+    "brief":  "\n\n[背景] 用户偏好简洁回答，避免冗长。",
+    "normal": "",
+    "deep":   "\n\n[背景] 用户希望了解完整推导，可适当展开。",
+}
+# 前端用的中文标签（caption 显示）
+INTENT_LABEL = {
+    "research": "研究",
+    "learn":    "学习",
+    "creative": "创意",
+    "general":  "通用",
+}
+DETAIL_LABEL = {
+    "brief":  "简洁",
+    "normal": "适中",
+    "deep":   "详细",
+}
+
+
+def get_prompt(task: Optional[str], user_intent: str = "general",
+               detail_level: str = "normal") -> str:
+    """根据任务代号取系统提示词 + 用户画像后缀。
+
+    后缀只追加不替换——保持任务的核心人设不变；画像仅做"轻"风格微调。
+    """
     if task and task in TASK_PROMPTS:
-        return TASK_PROMPTS[task]["prompt"]
-    return CUSTOM_DEFAULT_PROMPT
+        base = TASK_PROMPTS[task]["prompt"]
+    else:
+        base = CUSTOM_DEFAULT_PROMPT
+    suffix = _PROFILE_INTENT_SUFFIX.get(user_intent, "") + \
+             _PROFILE_DETAIL_SUFFIX.get(detail_level, "")
+    return base + suffix if suffix else base
 
 
 def tasks_summary() -> list[dict]:

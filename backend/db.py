@@ -16,10 +16,14 @@ def _now() -> str:
 
 
 def get_conn() -> sqlite3.Connection:
-    """打开一个新连接，行以字典形式访问。"""
-    conn = sqlite3.connect(settings.db_path)
+    """打开一个新连接，行以字典形式访问。WAL + busy_timeout 让并发读不阻塞写。"""
+    conn = sqlite3.connect(settings.db_path, timeout=10)
     conn.row_factory = sqlite3.Row
+    # WAL 模式：读不阻塞写，写不阻塞读；高并发流式 + 落库的关键
     conn.execute("PRAGMA foreign_keys = ON")  # 开启外键级联删除
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA synchronous = NORMAL")  # WAL 下折中选项：比 FULL 快很多，崩溃安全
     return conn
 
 
@@ -67,6 +71,13 @@ def init_db() -> None:
                 FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id);
+            -- 复合索引：按会话 + 插入顺序扫描（list_messages ORDER BY rowid + truncate 按 rowid 删除）
+            -- 注意：rowid 是 SQLite 隐式列，不能在 CREATE INDEX 中显式引用；
+            -- 普通 (conversation_id) 索引已能让 WHERE 子句走索引扫描，rowid 自然有序。
+            -- 所以这里只额外添加 (conversation_id) 的覆盖索引（如未来需要可加 created_at 排序版本）
+
+            -- 复合索引：会话列表"置顶优先 + 按更新时间倒序" 的核心查询
+            CREATE INDEX IF NOT EXISTS idx_conv_pinned_updated ON conversations(pinned DESC, updated_at DESC);
 
             -- 上传文件：抽取的文本随文件留存，聊天时按 id 取回注入上下文
             CREATE TABLE IF NOT EXISTS files (
@@ -88,6 +99,19 @@ def init_db() -> None:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}
         if "attachments" not in cols:
             conn.execute("ALTER TABLE messages ADD COLUMN attachments TEXT DEFAULT '[]'")
+
+        # 兼容旧库：prefs 表可能缺隐式用户画像列（P2 引入）
+        prefs_cols = {r["name"] for r in conn.execute("PRAGMA table_info(prefs)")}
+        profile_migrations = [
+            ("user_intent",         "TEXT DEFAULT 'general'"),
+            ("detail_level",        "TEXT DEFAULT 'normal'"),
+            ("profile_signals",     "TEXT DEFAULT '{}'"),
+            ("profile_updated_at",  "TEXT DEFAULT ''"),
+            ("profile_version",     "INTEGER DEFAULT 0"),
+        ]
+        for col, decl in profile_migrations:
+            if col not in prefs_cols:
+                conn.execute(f"ALTER TABLE prefs ADD COLUMN {col} {decl}")
 
 
 # ---------------- 偏好 ----------------
@@ -250,16 +274,23 @@ def add_file(filename: str, kind: str, size: int, chars: int,
 
 
 def get_files(file_ids: list[str]) -> list[dict]:
-    """按 id 批量取文件记录（保持传入顺序）。"""
+    """按 id 批量取文件记录（保持传入顺序）。单次 IN 查询，避免 N+1。"""
     if not file_ids:
         return []
+    # 去重但保持首次出现位置；最后再按原始顺序回填
+    seen = {}
+    for fid in file_ids:
+        if fid not in seen:
+            seen[fid] = None
+    placeholders = ",".join("?" * len(seen))
     with get_conn() as conn:
-        rows = {}
-        for fid in file_ids:
-            r = conn.execute("SELECT * FROM files WHERE id=?", (fid,)).fetchone()
-            if r:
-                rows[fid] = dict(r)
-        return [rows[fid] for fid in file_ids if fid in rows]
+        rows = conn.execute(
+            f"SELECT * FROM files WHERE id IN ({placeholders})",
+            list(seen.keys()),
+        ).fetchall()
+        for r in rows:
+            seen[r["id"]] = dict(r)
+    return [seen[fid] for fid in file_ids if seen.get(fid)]
 
 
 def get_file(file_id: str) -> Optional[dict]:

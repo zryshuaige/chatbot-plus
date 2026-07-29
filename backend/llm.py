@@ -153,22 +153,28 @@ async def stream_chat(
 
 # ---------------- 轻量调用：自动命名 ----------------
 async def generate_title(user_msg: str, assistant_msg: str) -> str:
-    """根据首轮问答生成 ≤12 字的会话标题。"""
+    """根据首轮问答生成 ≤12 字的会话标题。
+    失败时抛出异常（不兜底占位符），由调用方 /chat/title 抛 502 给前端 toast。"""
     prompt = (
         "请用不超过 12 个汉字为下面这段对话起一个简洁标题，"
         "只输出标题本身，不要引号、不要标点、不要解释。\n\n"
         f"用户：{user_msg[:300]}\n助手：{assistant_msg[:300]}"
     )
+    # 标题是「流式 finalize 同步路径」，必须快；8s 超时避免 UI 卡顿。
+    # 失败就 fail-fast，让前端暴露「再试一次」按钮，不要静默。
     resp = await client.chat.completions.create(
         model=settings.utility_model,
         messages=[{"role": "user", "content": prompt}],
         max_tokens=30,
         temperature=0.3,
+        timeout=8,
     )
     title = (resp.choices[0].message.content or "").strip().strip("\"'""''「」")
-    # 防御：只取第一行，截断过长标题
-    title = title.splitlines()[0][:20] if title else "新对话"
-    return title or "新对话"
+    title = title.splitlines()[0][:20] if title else ""
+    # 不再回退 "新对话"——空串 / 占位符都交给调用方当失败处理
+    if title == "新对话":
+        title = ""
+    return title
 
 
 # ---------------- 轻量调用：上下文压缩 ----------------

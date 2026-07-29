@@ -110,7 +110,7 @@ def _save_doc_bytes(raw: bytes, prefix: str, ext: str) -> dict:
     return {"file_id": fid, "filename": save_name, "kind": "document", "chars": 0}
 
 
-def _last_user_image_bytes(last_user: dict) -> bytes:
+def _last_user_image_bytes(last_user: dict | None) -> bytes:
     """取最后一条用户消息携带的第一张图片附件的字节；无则返回 b''。"""
     if not last_user:
         return b""
@@ -125,7 +125,7 @@ def _last_user_image_bytes(last_user: dict) -> bytes:
     return b""
 
 
-def _image_event_stream(conv: dict, last_user: dict, user_mid: str):
+def _image_event_stream(conv: dict, last_user: dict | None, user_mid: str):
     """图片生成/编辑任务的 SSE 流：start -> token(说明) -> image(附件元数据)
     -> usage -> done。生成结果落盘入库，作为助手消息的图片附件下发。
 
@@ -215,6 +215,24 @@ async def chat(req: ChatRequest):
     if not req.regenerate:
         user_mid = db.add_message(conv["id"], "user", req.query,
                                   attachments=attachments_meta)
+        # 隐式用户画像：累计本条信号，必要时触发 LLM 分类（异步、不阻塞对话）
+        import asyncio
+        try:
+            from profile.classifier import (
+                accumulate_signals, should_classify_now, classify_profile, persist_profile,
+            )
+            accumulate_signals(req.query or "")
+            if should_classify_now():
+                # 起后台任务分类：分类期间/失败都不阻塞本次响应
+                async def _run_classify():
+                    try:
+                        intent, detail = await classify_profile(db.get_prefs())
+                        persist_profile(intent, detail)
+                    except Exception:
+                        pass
+                asyncio.create_task(_run_classify())
+        except Exception:
+            pass  # profile 模块任何故障都不该影响主对话流
 
     # step02：组装上下文（可能触发压缩）
     messages = db.list_messages(conv["id"])
@@ -286,10 +304,12 @@ async def chat(req: ChatRequest):
         async def agent_event_stream():
             yield f"data: {json.dumps({'type': 'start', 'user_message_id': user_mid}, ensure_ascii=False)}\n\n"
             try:
-                async for ev in agent_stream(
+                # 用 agent.batch_token_events 把相邻 token 合并，降低 SSE 包数与前端重渲压力
+                from agent import _batch_token_events
+                async for ev in _batch_token_events(agent_stream(
                     conv, lc_messages, model, temperature, top_p, max_tokens,
                     multimodal_parts=img_parts or None,
-                ):
+                )):
                     yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
             except Exception as e:
                 yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
@@ -376,12 +396,23 @@ class TitleRequest(BaseModel):
 
 @router.post("/chat/title")
 async def make_title(req: TitleRequest):
-    """新对话首轮交换后调用，生成 ≤12 字标题。"""
+    """新对话首轮交换后调用，生成 ≤12 字标题。
+
+    失败时返回 HTTP 502 + detail；前端据此 toast + 暴露「💡 再试一次」按钮。
+    不再用占位符「新对话」兜底——前端二次过滤会把占位符当作失败，吞掉错误。
+    """
     try:
         title = await generate_title(req.user_msg, req.assistant_msg)
-        return {"code": 200, "title": title}
     except Exception as e:
-        return {"code": 500, "message": str(e), "title": "新对话"}
+        # 显式抛 502：前端能区分"成功 vs 失败"再做 toast 与重试
+        from fastapi import HTTPException
+        raise HTTPException(status_code=502, detail=f"标题生成失败：{e}")
+    # 防御：清掉返回里的占位符 / 空串，避免前端二次过滤把"假成功"当作失败
+    cleaned = (title or "").strip().splitlines()[0][:60]
+    if not cleaned or cleaned == "新对话":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=502, detail="标题生成失败：模型返回为空或占位符")
+    return {"code": 200, "title": cleaned}
 
 
 @router.get("/tools")

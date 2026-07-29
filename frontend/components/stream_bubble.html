@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stream</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1f2937;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --user-bg: #2563eb;
+    --user-fg: #ffffff;
+    --assistant-bg: transparent;
+    --border: #e5e7eb;
+    --code-bg: #f3f4f6;
+    --warn-fg: #b45309;
+    --warn-bg: #fef3c7;
+  }
+  body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         background: var(--bg); color: var(--fg); }
+  #bubbles { padding: 12px 16px; }
+  .msg { margin: 8px 0; max-width: 90%; word-wrap: break-word; }
+  .msg-user { margin-left: auto; }
+  .msg-user .bubble {
+    background: var(--user-bg); color: var(--user-fg);
+    border-radius: 12px; padding: 8px 12px; display: inline-block;
+    white-space: pre-wrap;
+  }
+  .msg-assistant .bubble { line-height: 1.55; }
+  .msg-assistant .bubble p { margin: 6px 0; }
+  .msg-assistant .bubble pre {
+    background: var(--code-bg); border-radius: 6px; padding: 8px 10px;
+    overflow-x: auto; font-size: 13px;
+  }
+  .msg-assistant .bubble code { background: var(--code-bg); padding: 1px 4px; border-radius: 3px; font-size: 13px; }
+  .msg-assistant .bubble pre code { background: transparent; padding: 0; }
+  .cp-cursor::after { content: "▍"; animation: cp-blink 1s steps(1) infinite; color: var(--accent); }
+  @keyframes cp-blink { 50% { opacity: 0; } }
+  .thinking { color: var(--muted); font-size: 14px; padding: 6px 0; }
+  .thinking span { animation: cp-blink 1.4s infinite; display: inline-block; width: 6px; height: 6px;
+                   margin: 0 2px; background: currentColor; border-radius: 50%; }
+  .thinking span:nth-child(2) { animation-delay: 0.2s; }
+  .thinking span:nth-child(3) { animation-delay: 0.4s; }
+  details.cp-tool-steps {
+    background: rgba(0,0,0,0.03); border: 1px solid var(--border); border-radius: 6px;
+    padding: 4px 10px; margin-bottom: 8px; font-size: 13px;
+  }
+  details.cp-tool-steps summary { cursor: pointer; font-weight: 500; }
+  details.cp-tool-steps ul { padding-left: 18px; margin: 6px 0; }
+  details.cp-tool-steps li { margin: 2px 0; color: var(--muted); }
+  .cp-step-warn { color: var(--warn-fg); background: var(--warn-bg); padding: 0 4px; border-radius: 3px; }
+  .cp-attachment { max-width: 240px; border-radius: 8px; margin-top: 6px; display: block; }
+  .cp-attach-chip {
+    display: inline-block; padding: 4px 10px; border-radius: 6px; background: var(--code-bg);
+    color: var(--fg); text-decoration: none; margin-top: 4px; font-size: 13px;
+  }
+  .cp-usage { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .cp-error { color: #dc2626; padding: 6px 0; }
+  .cp-empty { color: var(--muted); text-align: center; padding: 40px 20px; }
+  .cp-stop-btn {
+    background: #ef4444; color: white; border: none; border-radius: 4px;
+    padding: 4px 10px; font-size: 12px; cursor: pointer; margin-top: 4px;
+  }
+</style>
+</head>
+<body>
+<div id="bubbles"></div>
+
+<!-- marked.js from CDN (small, fast, MIT licensed) -->
+<script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
+<script>
+(function(){
+  const PARENT_ORIGIN = window.location.protocol === "file:" ? "*" : window.location.origin;
+  const bubbles = document.getElementById("bubbles");
+  let activeBubble = null;        // 当前助手 bubble 的 .bubble div
+  let pendingText = "";           // 已累积但未渲染的 token
+  let rafScheduled = false;
+  let toolStepMap = {};           // name -> step li
+  let conversationStarted = false;
+  let aborted = false;
+
+  // 配 marked：避免 XSS + 行内代码着色友好
+  marked.setOptions({ gfm: true, breaks: true });
+
+  function scrollToBottom() {
+    // 滚到 iframe 底部（Streamlit 父页面看不到这里，但父页面有独立滚动）
+    window.parent.postMessage({ type: "cp-stream-scrolled", scrollHeight: document.body.scrollHeight }, PARENT_ORIGIN);
+  }
+
+  function renderPending() {
+    if (!activeBubble || !pendingText) return;
+    // 处理未闭合代码块：把最后一个 ``` 替换为 0 宽字符 + 文字，避免显示原样
+    let text = pendingText;
+    const fenceCount = (text.match(/```/g) || []).length;
+    if (fenceCount % 2 === 1) {
+      text = text + "\n```"; // 零宽字符 + 文字版 ```
+    }
+    try {
+      const html = marked.parse(text);
+      activeBubble.innerHTML = html + '<span class="cp-cursor"></span>';
+    } catch (e) {
+      // 解析失败：原样显示纯文本
+      activeBubble.textContent = text;
+    }
+    scrollToBottom();
+  }
+
+  function scheduleRender() {
+    if (rafScheduled) return;
+    rafScheduled = true;
+    requestAnimationFrame(() => {
+      rafScheduled = false;
+      renderPending();
+    });
+  }
+
+  function makeMsg(role, content) {
+    const wrap = document.createElement("div");
+    wrap.className = "msg msg-" + role;
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    if (role === "user") {
+      bubble.textContent = content;
+      wrap.appendChild(bubble);
+    } else {
+      wrap.appendChild(bubble);
+      // 助手消息先建一个空的 tool-steps 容器
+      const steps = document.createElement("details");
+      steps.className = "cp-tool-steps";
+      steps.open = true;
+      steps.style.display = "none";
+      steps.innerHTML = '<summary><b>思考步骤</b></summary><ul class="cp-step-list"></ul>';
+      wrap.appendChild(steps);
+    }
+    bubbles.appendChild(wrap);
+    return { wrap, bubble, steps };
+  }
+
+  function startAssistantTurn() {
+    const m = makeMsg("assistant", "");
+    activeBubble = m.bubble;
+    activeBubble.innerHTML = '<div class="thinking"><span></span><span></span><span></span></div>';
+    pendingText = "";
+    toolStepMap = {};
+    // 添加停止按钮
+    const stopBtn = document.createElement("button");
+    stopBtn.className = "cp-stop-btn";
+    stopBtn.textContent = "停止";
+    stopBtn.onclick = () => {
+      aborted = true;
+      window.parent.postMessage({ type: "cp-stream-stop" }, PARENT_ORIGIN);
+      stopBtn.disabled = true;
+      stopBtn.textContent = "已停止";
+    };
+    m.wrap.appendChild(stopBtn);
+    scrollToBottom();
+  }
+
+  function addToolStep(name, args, status, message) {
+    if (!activeBubble) return;
+    const wrap = activeBubble.parentElement;
+    const steps = wrap.querySelector(".cp-tool-steps");
+    const ul = steps.querySelector(".cp-step-list");
+    steps.style.display = "block";
+    let li = toolStepMap[name];
+    if (!li) {
+      li = document.createElement("li");
+      li.dataset.name = name;
+      ul.appendChild(li);
+      toolStepMap[name] = li;
+    }
+    const argStr = Object.entries(args || {}).slice(0, 3)
+      .map(([k, v]) => k + "=" + String(v).slice(0, 60))
+      .join(", ") || "运行中…";
+    let icon = "🔧", cls = "";
+    let label = argStr;
+    if (status === "limit") { icon = "⛔"; cls = "cp-step-warn"; label = message || "循环守卫触发"; }
+    else if (status === "repeat") { icon = "🔁"; cls = "cp-step-warn"; label = message || "重复调用触发"; }
+    else if (status === "done") { icon = "✅"; label = "完成" + (args._duration ? `（${args._duration}ms）` : ""); }
+    else if (status === "error") { icon = "❌"; cls = "cp-step-warn"; label = message || "失败"; }
+    li.className = cls;
+    li.innerHTML = '<span>' + icon + '</span> <code>' + name + '</code> ' + label;
+  }
+
+  function addAttachment(att) {
+    if (!activeBubble) return;
+    const wrap = activeBubble.parentElement;
+    // 与 startStream 一致：只用 STREAM_PARAMS.backend_url，不再回退到 window.parent.location.origin
+    // 否则 LAN 下用户访问 streamlit 通过 192.168.x.x，但文件 URL 拿 origin 拿到的是
+    // 用户本机 IP（不一致），文件 403/404；甚至 sandbox 不同 realm 拒绝访问 parent.location
+    const baseUrl = (window.STREAM_PARAMS && window.STREAM_PARAMS.backend_url) || "";
+    if (!baseUrl) {
+      console.warn("[cp-stream] attachment skipped: backend_url not set", att);
+      return;
+    }
+    const url = baseUrl.replace(/\/+$/, "") + "/files/" + att.file_id;
+    if (att.kind === "image") {
+      const img = document.createElement("img");
+      img.className = "cp-attachment";
+      img.src = url + "?inline=1";
+      img.alt = att.filename;
+      wrap.appendChild(img);
+    } else {
+      const a = document.createElement("a");
+      a.className = "cp-attach-chip";
+      a.href = url;
+      a.download = att.filename;
+      a.textContent = "📎 " + att.filename;
+      wrap.appendChild(a);
+    }
+  }
+
+  function setUsage(u) {
+    if (!activeBubble) return;
+    const wrap = activeBubble.parentElement;
+    // 移除旧 usage
+    const old = wrap.querySelector(".cp-usage");
+    if (old) old.remove();
+    const div = document.createElement("div");
+    div.className = "cp-usage";
+    if (u.image_task) {
+      div.innerHTML = "🎨 画图任务 · 不计文本 token";
+    } else {
+      div.innerHTML = "⌨️ 输入 " + (u.prompt_tokens || 0) +
+                      " · ✍️ 输出 " + (u.completion_tokens || 0) +
+                      " · 合计 " + (u.total_tokens || 0) + " tokens" +
+                      (u.compressed ? " · 🗜 已压缩" : "");
+    }
+    wrap.appendChild(div);
+  }
+
+  function addUserBubble(content, attachments) {
+    const m = makeMsg("user", content);
+    if (attachments && attachments.length) {
+      attachments.forEach(a => addAttachment(a));
+    }
+    scrollToBottom();
+  }
+
+  function appendToken(content) {
+    if (aborted) return;
+    if (!activeBubble) startAssistantTurn();
+    pendingText += content;
+    // 首次 token 到达：替换思考中动画
+    const thinking = activeBubble.querySelector(".thinking");
+    if (thinking) thinking.remove();
+    scheduleRender();
+  }
+
+  function finalize(evt) {
+    if (activeBubble) {
+      // 清掉光标
+      const cur = activeBubble.querySelector(".cp-cursor");
+      if (cur) cur.remove();
+      renderPending();
+    }
+    if (evt && evt.usage) setUsage(evt.usage);
+    if (evt && evt.attachments) (evt.attachments || []).forEach(addAttachment);
+    activeBubble = null;
+    scrollToBottom();
+  }
+
+  function showError(msg) {
+    if (activeBubble) {
+      activeBubble.innerHTML = '<div class="cp-error">⚠️ ' + msg + '</div>';
+    } else {
+      const wrap = document.createElement("div");
+      wrap.className = "msg msg-assistant";
+      wrap.innerHTML = '<div class="cp-error">⚠️ ' + msg + '</div>';
+      bubbles.appendChild(wrap);
+    }
+    activeBubble = null;
+    scrollToBottom();
+  }
+
+  function reset() {
+    bubbles.innerHTML = "";
+    activeBubble = null;
+    pendingText = "";
+    toolStepMap = {};
+    aborted = false;
+    conversationStarted = false;
+  }
+
+  // 暴露给父页面（Streamlit 主程序）的事件接口
+  window.cpStream = {
+    reset, startAssistantTurn, appendToken, addToolStep, addAttachment,
+    setUsage, finalize, showError, addUserBubble,
+  };
+
+  // 测试入口：URL 参数 ?test=1 注入一些示例事件用于本地调试
+  if (new URLSearchParams(location.search).get("test") === "1") {
+    setTimeout(() => {
+      startAssistantTurn();
+      appendToken("## 你好\n这是一段 ");
+      appendToken("*带 markdown* 的 ");
+      appendToken("**测试**，");
+      appendToken("代码块：\n```python\nprint('hello')\n```");
+      setTimeout(() => addToolStep("calculate", {x: 1}, "start"), 200);
+      setTimeout(() => addToolStep("calculate", {x: 1}, "done", { _duration: 120 }), 600);
+      setTimeout(() => finalize({ usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 } }), 1500);
+    }, 300);
+  }
+
+  // ================ SSE 消费：fetch + ReadableStream ================
+  // 真实路径：iframe 直接 POST /chat，解析 SSE，逐事件调 cpStream.*。
+  // 这样 Streamlit 父页面无需 rerun、无需 queue.Queue、无需 0.3s 轮询。
+  // 流结束后 iframe 自己保存助手消息、调标题接口、通知父页面刷新。
+  let sseAbort = null;
+  let collectedContent = "";   // 累积的助手正文（用于流结束时保存到 DB）
+  let collectedUsage = null;
+  let collectedAttachments = [];
+  let collectedModel = "";     // 流式开始时从参数传入
+  let collectedUserMessageId = null;
+
+  async function startStream() {
+    const p = window.STREAM_PARAMS || {};
+    if (!p.cid || !p.query) {
+      showError("缺少 cid 或 query");
+      return;
+    }
+    collectedModel = p.model || "";
+
+    // 后端 URL：必须由父页面注入。不再用 parent.cpBackendUrl / parent.location.origin
+    // 作为回退——iframe 与 Streamlit 父页面跨 realm（sandbox 不同），window.parent.*
+    // 访问被拒或会拿到错的 origin；强制只读注入的 backend_url。
+    // 缺失则直接报错，绝不打错端口。
+    const backendUrl = p.backend_url;
+    if (!backendUrl) {
+      showError("后端 URL 未注入（USE_IFRAME_STREAM 启用但 app.py 未传 backend_url）");
+      window.parent.postMessage({ type: "cp-stream-error",
+        error: "backend_url missing" }, PARENT_ORIGIN);
+      return;
+    }
+    // 用户气泡
+    if (p.user_attachments && p.user_attachments.length) {
+      addUserBubble(p.query, p.user_attachments);
+    }
+    // 启动助手
+    startAssistantTurn();
+    reset();  // 上面的 addUserBubble/startAssistantTurn 已经把内容加上；保留即可
+
+    sseAbort = new AbortController();
+    let resp;
+    try {
+      resp = await fetch(backendUrl.replace(/\/+$/, "") + "/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          conversation_id: p.cid,
+          query: p.query,
+          regenerate: !!p.regenerate,
+          temperature: p.temperature,
+          top_p: p.top_p,
+          max_tokens: p.max_tokens,
+          file_ids: p.file_ids || [],
+        }),
+        signal: sseAbort.signal,
+      });
+    } catch (e) {
+      showError("网络错误：" + e.message);
+      window.parent.postMessage({ type: "cp-stream-error", error: e.message }, PARENT_ORIGIN);
+      return;
+    }
+    if (!resp.ok) {
+      let detail = "";
+      try { detail = (await resp.json()).detail || ""; } catch {}
+      showError("后端返回 " + resp.status + (detail ? "： " + detail : ""));
+      window.parent.postMessage({ type: "cp-stream-error", status: resp.status }, PARENT_ORIGIN);
+      return;
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // SSE 解析：data: {json}\n\n
+      let idx;
+      while ((idx = buffer.indexOf("\n\n")) !== -1) {
+        const block = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        for (const line of block.split("\n")) {
+          if (!line.startsWith("data: ")) continue;
+          const payload = line.slice(6);
+          let evt;
+          try { evt = JSON.parse(payload); } catch { continue; }
+          handleEvent(evt);
+        }
+      }
+    }
+    await onStreamComplete();
+  }
+
+  function handleEvent(evt) {
+    const t = evt.type;
+    if (t === "start") {
+      collectedUserMessageId = evt.user_message_id;
+      window.parent.postMessage({ type: "cp-stream-start", user_message_id: evt.user_message_id }, PARENT_ORIGIN);
+    } else if (t === "token") {
+      const c = evt.content || "";
+      collectedContent += c;
+      appendToken(c);
+    } else if (t === "tool") {
+      addToolStep(evt.name, evt.args || {}, evt.status || "start", evt.message);
+    } else if (t === "image" || t === "file") {
+      (evt.attachments || []).forEach(addAttachment);
+      collectedAttachments = collectedAttachments.concat(evt.attachments || []);
+    } else if (t === "usage") {
+      collectedUsage = evt;
+    } else if (t === "done") {
+      // reader 读完后再统一 finalize
+    } else if (t === "error") {
+      showError(evt.message || "生成失败");
+      window.parent.postMessage({ type: "cp-stream-error", error: evt.message }, PARENT_ORIGIN);
+    }
+  }
+
+  // 流结束：保存助手消息、调标题接口、通知父页面刷新
+  async function onStreamComplete() {
+    finalize({ usage: collectedUsage, attachments: collectedAttachments });
+    const p = window.STREAM_PARAMS || {};
+    const sid = p.stream_id || "default";
+    sessionStorage.setItem("cp_stream_done_" + sid, "1");
+    // 不再 location.reload 父页面——改用流式 fragment 轮询检测新消息来清状态。
+    // 这里只发个 cp-stream-done 让父页 fragment 知道可以提前切。
+    const backendUrl = (p.backend_url || "").replace(/\/+$/, "");
+    if (!backendUrl) {
+      console.warn("[cp-stream] backend_url missing, skip save-message");
+    } else {
+      // 1. 保存助手消息（如果有任何内容或附件）
+      if (collectedContent.trim() || collectedAttachments.length) {
+        try {
+          await fetch(backendUrl + "/conversations/" + p.cid + "/messages", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              role: "assistant",
+              content: collectedContent,
+              tokens: (collectedUsage && collectedUsage.total_tokens) || 0,
+              model: collectedModel,
+              attachments: collectedAttachments,
+            }),
+          });
+        } catch (e) {
+          console.warn("save assistant message failed:", e);
+        }
+      }
+    }
+    // 2. 触发父页面刷新：让 Streamlit 把 streaming 状态清掉、新消息展示到列表
+    //    不再 location.reload()（会丢 streaming 上下文），
+    //    改用 postMessage 通知；父页面的轻量级 fragment 会定期轮询并最终切到非流式状态。
+    window.parent.postMessage({ type: "cp-stream-done", stream_id: sid }, PARENT_ORIGIN);
+  }
+
+  // 监听父页面 postMessage：cp-stream-stop 用于中止
+  window.addEventListener("message", (e) => {
+    if (!e.data) return;
+    if (e.data.type === "cp-stream-stop" && sseAbort) {
+      try { sseAbort.abort(); } catch {}
+      finalize({});
+      onStreamComplete();  // 中止后也要保存已收到的部分内容
+      window.parent.postMessage({ type: "cp-stream-stopped" }, PARENT_ORIGIN);
+    }
+  });
+
+  // 自动启动（如果注入 STREAM_PARAMS）
+  // 防重入：用 sessionStorage 记录"本流已跑过"标记——stream_id 由父页面注入，
+  // reload 后同一个 stream_id 不会再触发 startStream（避免连续重启两次流式）
+  if (window.STREAM_PARAMS && window.STREAM_PARAMS.autoStart !== false) {
+    const sid = window.STREAM_PARAMS.stream_id || "default";
+    if (sessionStorage.getItem("cp_stream_done_" + sid) === "1") {
+      // 已完成过：父页面已 location.reload 回来；此时主区域已经能看到助手消息。
+      // 我们让 iframe 自动隐藏（仅留一个小提示），不挡主内容。
+      setTimeout(() => {
+        document.body.style.minHeight = "auto";
+        bubbles.innerHTML = '<div class="cp-empty">✅ 已完成</div>';
+      }, 50);
+    } else if (window.STREAM_PARAMS.cid && window.STREAM_PARAMS.query) {
+      sessionStorage.setItem("cp_stream_done_" + sid, "0");
+      setTimeout(startStream, 50);
+    }
+  }
+})();
+</script>
+</body>
+</html>

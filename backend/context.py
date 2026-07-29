@@ -49,7 +49,13 @@ async def build_llm_messages(
     - messages: 最终发给大模型的消息列表
     - compressed: 本次是否触发了压缩
     """
-    system_prompt = get_prompt(conversation.get("task"))
+    # 注入隐式用户画像：从 prefs 读取当前 intent + detail_level，追加轻量后缀
+    _prefs = db.get_prefs()
+    system_prompt = get_prompt(
+        conversation.get("task"),
+        user_intent=_prefs.get("user_intent") or "general",
+        detail_level=_prefs.get("detail_level") or "normal",
+    )
     summary = conversation.get("summary") or ""
     summary_until = conversation.get("summary_until_msg_id") or ""
 
